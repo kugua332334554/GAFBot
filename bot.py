@@ -391,7 +391,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
              btn("整合号包", "merge_packs", "5877307202888273539")],
             [btn("双向测试", "test_bidirectional", "5922612721244704425"), 
              btn("踢其他设备", "kick_devices", "5877318502947229960")],
-            [btn("隐私配置", "privacy_config", "5877597667231534929"),
+            [btn("隐私配置", "privacy_config", "5931409969613116639"),
              btn("格式互转", "format_convert", "6005843436479975944")],
             [btn("转API", "convert_api", "5877597667231534929"),
              btn("防止找回", "prevent_recovery", "5870734657384877785")],
