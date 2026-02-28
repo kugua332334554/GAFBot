@@ -423,14 +423,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await send_payment_prompt(update, context)
 
 if __name__ == '__main__':
-    if not TOKEN:
-        print("Error: BOT_TOKEN 未设置")
-        exit(1)
-    
     os.makedirs("downloads", exist_ok=True)
-    
     cleanup_expired_orders()
-    
     app = ApplicationBuilder().token(TOKEN).post_init(post_init).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(button_callback))
