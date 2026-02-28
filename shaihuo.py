@@ -1,4 +1,3 @@
-# shaihuo.py
 import os
 import zipfile
 import shutil
@@ -65,8 +64,6 @@ async def check_session_alive(session_file, json_file, api_id, api_hash):
 
 async def handle_shaihuo_document(update, context, user_id, user_states):
     document = update.message.document
-    
-    # 验证文件类型
     if not document.file_name.endswith('.zip'):
         from bot import create_back_button
         keyboard = [[create_back_button()]]
@@ -121,8 +118,6 @@ async def handle_shaihuo_document(update, context, user_id, user_states):
 async def process_shaihuo(update, context, zip_path, user_id):
     from telegram import InlineKeyboardMarkup
     from bot import create_back_button
-    
-    # 检查文件大小
     file_size = os.path.getsize(zip_path)
     if file_size > MAX_ZIP_SIZE:
         keyboard = [[create_back_button()]]
