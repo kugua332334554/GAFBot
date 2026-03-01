@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 from dotenv import load_dotenv
 load_dotenv()
 CHANGE_2FA_BACK = os.getenv("CHANGE_2FA_BACK", "").replace('\\n', '\n')
-MAX_ZIP_SIZE = int(os.getenv("MK_TIME", 4)) * 1024 * 1024
+MAX_EXTRACT_SIZE = int(os.getenv("MK_TIME", 4)) * 1024 * 1024
 MAX_TASK_TIME = int(os.getenv("MK_LIST_TIME", "120").replace('S', ''))
 BACK_BUTTON_EMOJI_ID = "5877629862306385808"
 
@@ -371,20 +371,16 @@ async def check_session_2fa(session_file, json_file, api_id, api_hash, old_2fa=N
     
     return result
 
+def get_total_size(path):
+    total = 0
+    for root, dirs, files in os.walk(path):
+        for f in files:
+            fp = os.path.join(root, f)
+            if os.path.isfile(fp):
+                total += os.path.getsize(fp)
+    return total
+
 async def process_2fa(update, context, zip_path, user_id, mode, old_2fa, new_2fa):
-    file_size = os.path.getsize(zip_path)
-    if file_size > MAX_ZIP_SIZE:
-        keyboard = [[create_back_button()]]
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        
-        await context.bot.send_message(
-            chat_id=update.effective_chat.id,
-            text=f"<tg-emoji emoji-id='5778527486270770928'>❌</tg-emoji> 文件过大，最大允许 {MAX_ZIP_SIZE//1024//1024}MB",
-            parse_mode='HTML',
-            reply_markup=reply_markup
-        )
-        return
-    
     api_id_str = os.getenv("TELEGRAM_APP_ID")
     api_hash = os.getenv("TELEGRAM_APP_HASH")
     admins = os.getenv("ADMIN_ID", "").split(",")
@@ -439,6 +435,10 @@ async def _process_2fa_internal(update, context, zip_path, user_id, api_id, api_
         try:
             with zipfile.ZipFile(zip_path, 'r') as zip_ref:
                 zip_ref.extractall(extract_dir)
+                
+                extracted_size = get_total_size(extract_dir)
+                if extracted_size > MAX_EXTRACT_SIZE:
+                    raise Exception(f"解压后文件过大 ({extracted_size//1024//1024}MB > {MAX_EXTRACT_SIZE//1024//1024}MB)")
         except Exception as e:
             keyboard = [[create_back_button()]]
             reply_markup = InlineKeyboardMarkup(keyboard)
