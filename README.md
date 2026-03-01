@@ -13,7 +13,7 @@ GAFBot是针对Telegram号商的多功能Bot。使用Python语音。
 
 # 安装依赖
 
-pip install -r requirements.txt
+pip install python-telegram-bot telethon python-dotenv requests
 
 # 运行机器人
 
