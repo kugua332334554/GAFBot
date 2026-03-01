@@ -15,6 +15,7 @@ from xiugai2fa import (
     handle_2fa_document, CHANGE_2FA_BACK
 )
 from zhenghe import show_merge_packs, handle_merge_document, confirm_merge, user_merge_sessions
+from tishebei import show_kick_devices, handle_kick_document, user_kick_states, KICK_DEVICES_BACK
 
 load_dotenv()
 TOKEN = os.getenv("BOT_TOKEN")
@@ -76,7 +77,6 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     all_users = load_all_users()
     user_data = all_users.get(user_id, {})
     
-    # 非VIP禁止使用任何功能（除了返回主菜单）
     if user_data.get("status") != "vip" and data not in ["back_to_main"]:
         await query.edit_message_text(
             text=UN_ACTIVE_MSG,
@@ -125,8 +125,10 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data == "confirm_merge":
         await confirm_merge(update, context, user_states)
         
-    elif data in ["test_bidirectional", "kick_devices", 
-                "privacy_config", "format_convert", "convert_api", "prevent_recovery", 
+    elif data == "kick_devices":
+        await show_kick_devices(update, context)
+        
+    elif data in ["test_bidirectional", "privacy_config", "format_convert", "convert_api", "prevent_recovery", 
                 "check_ban", "check_material", "clean_account", "unpack_tool"]:
         keyboard = [[create_back_button()]]
         reply_markup = InlineKeyboardMarkup(keyboard)
@@ -153,7 +155,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await handle_2fa_text_input(update, context)
         return
     
-    # 非VIP禁止使用任何功能
     if user_data.get("status") != "vip":
         await update.message.reply_text(UN_ACTIVE_MSG, parse_mode=ParseMode.HTML)
         return
@@ -214,7 +215,6 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await handle_2fa_document(update, context)
         return
     
-    # 非VIP禁止使用任何功能
     if user_data.get("status") != "vip":
         await update.message.reply_text(UN_ACTIVE_MSG, parse_mode=ParseMode.HTML)
         return
@@ -224,6 +224,8 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await handle_shaihuo_document(update, context, user_id, user_states)
     elif state == "waiting_merge_packs":
         await handle_merge_document(update, context, user_id)
+    elif state == "waiting_kick_zip" or user_id in user_kick_states:
+        await handle_kick_document(update, context, user_id)
 
 async def check_pay_status(context: ContextTypes.DEFAULT_TYPE):
     job = context.job
