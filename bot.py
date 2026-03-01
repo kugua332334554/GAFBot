@@ -1,3 +1,4 @@
+# bot.py (updated with bidirectional support)
 import os
 import logging
 import re
@@ -16,6 +17,7 @@ from xiugai2fa import (
 )
 from zhenghe import show_merge_packs, handle_merge_document, confirm_merge, user_merge_sessions
 from tishebei import show_kick_devices, handle_kick_document, user_kick_states, KICK_DEVICES_BACK
+from shuangxiang import show_bidirectional, handle_bidirectional_document, user_bidirectional_states, TEST_BIDIRECTIONAL_BACK
 
 load_dotenv()
 TOKEN = os.getenv("BOT_TOKEN")
@@ -128,7 +130,10 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data == "kick_devices":
         await show_kick_devices(update, context)
         
-    elif data in ["test_bidirectional", "privacy_config", "format_convert", "convert_api", "prevent_recovery", 
+    elif data == "test_bidirectional":
+        await show_bidirectional(update, context)
+        
+    elif data in ["privacy_config", "format_convert", "convert_api", "prevent_recovery", 
                 "check_ban", "check_material", "clean_account", "unpack_tool"]:
         keyboard = [[create_back_button()]]
         reply_markup = InlineKeyboardMarkup(keyboard)
@@ -226,6 +231,8 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await handle_merge_document(update, context, user_id)
     elif state == "waiting_kick_zip" or user_id in user_kick_states:
         await handle_kick_document(update, context, user_id)
+    elif state == "waiting_bidirectional_zip" or user_id in user_bidirectional_states:
+        await handle_bidirectional_document(update, context, user_id)
 
 async def check_pay_status(context: ContextTypes.DEFAULT_TYPE):
     job = context.job
