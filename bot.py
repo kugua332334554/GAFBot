@@ -1,3 +1,4 @@
+# bot.py (修改部分)
 import os
 import logging
 import re
@@ -14,6 +15,7 @@ from xiugai2fa import (
     show_2fa_menu, handle_2fa_mode_selection, handle_2fa_text_input, 
     handle_2fa_document, CHANGE_2FA_BACK
 )
+from zhenghe import show_merge_packs, handle_merge_document, confirm_merge, user_merge_sessions
 
 load_dotenv()
 TOKEN = os.getenv("BOT_TOKEN")
@@ -27,6 +29,7 @@ OKPAY_ID = os.getenv("OKPAY_ID")
 OKPAY_TOKEN = os.getenv("OKPAY_TOKEN")
 OKPAY_PAYED = os.getenv("OKPAY_PAYED")
 OKPAY_COST = os.getenv("OKPAY_COST")
+MERGE_PACKS_BACK = os.getenv("MERGE_PACKS_BACK", "").replace('\\n', '\n')
 BACK_BUTTON_EMOJI_ID = "5877629862306385808"
 
 if isinstance(ACCOUNT_LOGIN_BACK, str):
@@ -117,7 +120,13 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data in ["2fa_input_mode", "2fa_auto_mode", "2fa_force_mode"]:
         await handle_2fa_mode_selection(update, context)
         
-    elif data in ["merge_packs", "test_bidirectional", "kick_devices", 
+    elif data == "merge_packs":
+        await show_merge_packs(update, context, MERGE_PACKS_BACK, user_states)
+        
+    elif data == "confirm_merge":
+        await confirm_merge(update, context, user_states)
+        
+    elif data in ["test_bidirectional", "kick_devices", 
                 "privacy_config", "format_convert", "convert_api", "prevent_recovery", 
                 "check_ban", "check_material", "clean_account", "unpack_tool"]:
         keyboard = [[create_back_button()]]
@@ -214,6 +223,8 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     state = user_states.get(user_id)
     if state == "waiting_shaihuo":
         await handle_shaihuo_document(update, context, user_id, user_states)
+    elif state == "waiting_merge_packs":
+        await handle_merge_document(update, context, user_id)
 
 async def check_pay_status(context: ContextTypes.DEFAULT_TYPE):
     job = context.job
