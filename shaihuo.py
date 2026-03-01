@@ -8,14 +8,14 @@ from datetime import datetime
 from telethon import TelegramClient
 from telethon.errors import SessionPasswordNeededError, FloodWaitError, UsernameNotOccupiedError
 import logging
-
+from telegram import InlineKeyboardMarkup
 logger = logging.getLogger(__name__)
 
 from dotenv import load_dotenv
 load_dotenv()
 SHAIHUO_BACK = os.getenv("SHAIHUO_BACK", "").replace('\\n', '\n')
 
-MAX_ZIP_SIZE = int(os.getenv("MK_TIME", 4)) * 1024 * 1024
+MAX_EXTRACT_SIZE = int(os.getenv("MK_TIME", 4)) * 1024 * 1024
 MAX_TASK_TIME = int(os.getenv("MK_LIST_TIME", "120").replace('S', ''))
 
 async def check_session_alive(session_file, json_file, api_id, api_hash):
@@ -61,6 +61,15 @@ async def check_session_alive(session_file, json_file, api_id, api_hash):
     finally:
         if client:
             await client.disconnect()
+
+def get_total_size(path):
+    total = 0
+    for root, dirs, files in os.walk(path):
+        for f in files:
+            fp = os.path.join(root, f)
+            if os.path.isfile(fp):
+                total += os.path.getsize(fp)
+    return total
 
 async def handle_shaihuo_document(update, context, user_id, user_states):
     document = update.message.document
@@ -118,20 +127,7 @@ async def handle_shaihuo_document(update, context, user_id, user_states):
 async def process_shaihuo(update, context, zip_path, user_id):
     from telegram import InlineKeyboardMarkup
     from bot import create_back_button
-    file_size = os.path.getsize(zip_path)
-    if file_size > MAX_ZIP_SIZE:
-        keyboard = [[create_back_button()]]
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        
-        await context.bot.send_message(
-            chat_id=update.effective_chat.id,
-            text=f"<tg-emoji emoji-id='5886496611835581345'>❌</tg-emoji> 文件过大，最大允许 {MAX_ZIP_SIZE//1024//1024}MB",
-            parse_mode='HTML',
-            reply_markup=reply_markup
-        )
-        return
     
-    # 获取API配置
     api_id_str = os.getenv("TELEGRAM_APP_ID")
     api_hash = os.getenv("TELEGRAM_APP_HASH")
     admins = os.getenv("ADMIN_ID", "").split(",")
@@ -188,6 +184,10 @@ async def _process_shaihuo_internal(update, context, zip_path, user_id, api_id, 
         try:
             with zipfile.ZipFile(zip_path, 'r') as zip_ref:
                 zip_ref.extractall(extract_dir)
+                
+                extracted_size = get_total_size(extract_dir)
+                if extracted_size > MAX_EXTRACT_SIZE:
+                    raise Exception(f"解压后文件过大 ({extracted_size//1024//1024}MB > {MAX_EXTRACT_SIZE//1024//1024}MB)")
         except Exception as e:
             keyboard = [[create_back_button()]]
             reply_markup = InlineKeyboardMarkup(keyboard)
@@ -299,7 +299,6 @@ async def _process_shaihuo_internal(update, context, zip_path, user_id, api_id, 
                         arcname = os.path.relpath(file_path, dead_dir)
                         zipf.write(file_path, arcname)
         
-        # 发送统计结果
         result_text = f"""<tg-emoji emoji-id="5845955401916355857">✅</tg-emoji> <b>筛活完成</b>
 
 <tg-emoji emoji-id="5931472654660800739">📊</tg-emoji> 统计结果:
