@@ -1,4 +1,3 @@
-# bot.py (修改部分)
 import os
 import logging
 import re
