@@ -1,4 +1,3 @@
-# bot.py (updated with bidirectional support)
 import os
 import logging
 import re
