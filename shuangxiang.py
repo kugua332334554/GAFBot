@@ -60,20 +60,19 @@ def get_total_size(path):
 async def check_account_restriction(client, session_name):
     try:
         spambot = await client.get_entity(SPAMBOT_USERNAME)
-        msg = await client.send_message(spambot, "/start")
+        await client.send_message(spambot, "/start")
         await asyncio.sleep(3)
         
-        async for message in client.iter_messages(spambot, limit=5):
+        async for message in client.iter_messages(spambot, limit=1):
             if message.out:
                 continue
-            text = message.text.lower()
-            if "bird" in text and "free" in text:
+            text = message.text
+            
+            if ("bird" in text and "free" in text) or \
+               ("Kabar baik, akun Anda tidak dibatasi" in text) or \
+               ("Boas notícias, nenhum limite foi aplicado à sua conta" in text):
                 return "unlimited", "无限制账户"
-            if "aplicado" in text:
-                return "limited", "有限制账户"
-            if "anda bebas" in text:
-                return "unlimited", "无限制账户"
-            if "restricted" in text or "limited" in text:
+            else:
                 return "limited", "有限制账户"
         
         return "unknown", "无法判断"
@@ -127,6 +126,7 @@ async def process_session(session_file, json_file, api_id, api_hash):
 
 async def handle_bidirectional_document(update: Update, context: ContextTypes.DEFAULT_TYPE, user_id: str):
     document = update.message.document
+    zip_path = None
     
     if not document.file_name.endswith('.zip'):
         keyboard = [[create_back_button()]]
@@ -158,11 +158,6 @@ async def handle_bidirectional_document(update: Update, context: ContextTypes.DE
         
         await process_bidirectional(update, context, zip_path, user_id)
         
-        try:
-            os.remove(zip_path)
-        except:
-            pass
-        
     except Exception as e:
         logger.error(f"处理文件失败: {e}")
         keyboard = [[create_back_button()]]
@@ -173,8 +168,15 @@ async def handle_bidirectional_document(update: Update, context: ContextTypes.DE
             reply_markup=reply_markup
         )
     finally:
+        if zip_path and os.path.exists(zip_path):
+            try:
+                os.remove(zip_path)
+            except:
+                pass
+        
         context.user_data.pop('bidirectional_state', None)
         user_bidirectional_states.pop(user_id, None)
+        
         try:
             await status_msg.delete()
         except:
@@ -225,6 +227,10 @@ async def process_bidirectional(update, context, zip_path, user_id):
         )
 
 async def _process_bidirectional_internal(update, context, zip_path, user_id, api_id, api_hash, admins):
+    unlimited_zip = None
+    limited_zip = None
+    failed_zip = None
+    
     with tempfile.TemporaryDirectory() as temp_dir:
         extract_dir = os.path.join(temp_dir, "extracted")
         os.makedirs(extract_dir, exist_ok=True)
