@@ -15,6 +15,8 @@ GAFBot是针对Telegram号商的多功能Bot。使用Python语音。
 
 pip install python-telegram-bot telethon python-dotenv requests
 
+pip install "python-telegram-bot[job-queue]"
+
 # 运行机器人
 
 python bot.py
