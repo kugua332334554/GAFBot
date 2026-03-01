@@ -1,3 +1,4 @@
+# bot.py
 import os
 import logging
 import re
@@ -10,6 +11,10 @@ from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes, Messa
 from pay import OkayPay, add_order, remove_order, cleanup_expired_orders, ORDER_TIMEOUT, load_all_users, save_all_users
 from shaihuo import process_shaihuo, handle_shaihuo_document, SHAIHUO_BACK
 from login import LoginHandler, ACCOUNT_LOGIN_BACK
+from xiugai2fa import (
+    show_2fa_menu, handle_2fa_mode_selection, handle_2fa_text_input, 
+    handle_2fa_document, CHANGE_2FA_BACK
+)
 
 load_dotenv()
 TOKEN = os.getenv("BOT_TOKEN")
@@ -24,10 +29,13 @@ OKPAY_TOKEN = os.getenv("OKPAY_TOKEN")
 OKPAY_PAYED = os.getenv("OKPAY_PAYED")
 OKPAY_COST = os.getenv("OKPAY_COST")
 BACK_BUTTON_EMOJI_ID = "5877629862306385808"
+
 if isinstance(ACCOUNT_LOGIN_BACK, str):
     ACCOUNT_LOGIN_BACK = ACCOUNT_LOGIN_BACK.replace('\\n', '\n')
+
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
+
 user_states = {}
 login_handlers = {}
 
@@ -67,7 +75,8 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     all_users = load_all_users()
     user_data = all_users.get(user_id, {})
     
-    if user_data.get("status") != "vip" and data != "back_to_main":
+    # 非VIP禁止使用任何功能（除了返回主菜单）
+    if user_data.get("status") != "vip" and data not in ["back_to_main"]:
         await query.edit_message_text(
             text=UN_ACTIVE_MSG,
             parse_mode=ParseMode.HTML
@@ -103,7 +112,13 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         login_handlers[user_id] = LoginHandler(user_id, update.effective_chat.id)
         user_states[user_id] = "waiting_phone"
         
-    elif data in ["change_2fa", "merge_packs", "test_bidirectional", "kick_devices", 
+    elif data == "change_2fa":
+        await show_2fa_menu(update, context)
+        
+    elif data in ["2fa_input_mode", "2fa_auto_mode", "2fa_force_mode"]:
+        await handle_2fa_mode_selection(update, context)
+        
+    elif data in ["merge_packs", "test_bidirectional", "kick_devices", 
                 "privacy_config", "format_convert", "convert_api", "prevent_recovery", 
                 "check_ban", "check_material", "clean_account", "unpack_tool"]:
         keyboard = [[create_back_button()]]
@@ -124,13 +139,19 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = str(update.effective_user.id)
     text = update.message.text
     
-    if user_id not in user_states:
-        return
-    
     all_users = load_all_users()
     user_data = all_users.get(user_id, {})
+    
+    if '2fa_state' in context.user_data:
+        await handle_2fa_text_input(update, context)
+        return
+    
+    # 非VIP禁止使用任何功能
     if user_data.get("status") != "vip":
         await update.message.reply_text(UN_ACTIVE_MSG, parse_mode=ParseMode.HTML)
+        return
+    
+    if user_id not in user_states:
         return
     
     state = user_states.get(user_id)
@@ -178,8 +199,20 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = str(update.effective_user.id)
-    state = user_states.get(user_id)
     
+    all_users = load_all_users()
+    user_data = all_users.get(user_id, {})
+    
+    if '2fa_state' in context.user_data and context.user_data['2fa_state'] == "waiting_2fa_zip":
+        await handle_2fa_document(update, context)
+        return
+    
+    # 非VIP禁止使用任何功能
+    if user_data.get("status") != "vip":
+        await update.message.reply_text(UN_ACTIVE_MSG, parse_mode=ParseMode.HTML)
+        return
+    
+    state = user_states.get(user_id)
     if state == "waiting_shaihuo":
         await handle_shaihuo_document(update, context, user_id, user_states)
 
@@ -351,7 +384,6 @@ async def remove_vip(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     
-    # 处理回调查询的情况
     if update.callback_query:
         message = update.callback_query.message
         chat_id = message.chat_id
