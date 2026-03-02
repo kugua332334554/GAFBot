@@ -17,6 +17,11 @@ from xiugai2fa import (
 from zhenghe import show_merge_packs, handle_merge_document, confirm_merge, user_merge_sessions
 from tishebei import show_kick_devices, handle_kick_document, user_kick_states, KICK_DEVICES_BACK
 from shuangxiang import show_bidirectional, handle_bidirectional_document, user_bidirectional_states, TEST_BIDIRECTIONAL_BACK
+from yinsi import (
+    show_privacy_config, handle_privacy_selection, handle_privacy_option,
+    handle_privacy_confirm_upload, handle_privacy_reset_all, handle_privacy_document,
+    user_privacy_states
+)
 
 load_dotenv()
 TOKEN = os.getenv("BOT_TOKEN")
@@ -117,7 +122,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data == "change_2fa":
         await show_2fa_menu(update, context)
         
-    elif data in ["2fa_input_mode", "2fa_auto_mode", "2fa_force_mode"]:
+    elif data in ["2fa_input_mode", "2fa_auto_mode"]:
         await handle_2fa_mode_selection(update, context)
         
     elif data == "merge_packs":
@@ -132,7 +137,22 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data == "test_bidirectional":
         await show_bidirectional(update, context)
         
-    elif data in ["privacy_config", "format_convert", "convert_api", "prevent_recovery", 
+    elif data == "privacy_config":
+        await show_privacy_config(update, context)
+    
+    elif data in ["privacy_phone", "privacy_last_seen", "privacy_forward", "privacy_profile_photo"]:
+        await handle_privacy_selection(update, context)
+    
+    elif data in ["privacy_set_everyone", "privacy_set_contacts", "privacy_set_nobody"]:
+        await handle_privacy_option(update, context)
+    
+    elif data == "privacy_confirm_upload":
+        await handle_privacy_confirm_upload(update, context)
+    
+    elif data == "privacy_reset_all":
+        await handle_privacy_reset_all(update, context)
+        
+    elif data in ["format_convert", "convert_api", "prevent_recovery", 
                 "check_ban", "check_material", "clean_account", "unpack_tool"]:
         keyboard = [[create_back_button()]]
         reply_markup = InlineKeyboardMarkup(keyboard)
@@ -232,6 +252,8 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await handle_kick_document(update, context, user_id)
     elif state == "waiting_bidirectional_zip" or user_id in user_bidirectional_states:
         await handle_bidirectional_document(update, context, user_id)
+    elif user_id in user_privacy_states and user_privacy_states[user_id].get("waiting_zip"):
+        await handle_privacy_document(update, context, user_id)
 
 async def check_pay_status(context: ContextTypes.DEFAULT_TYPE):
     job = context.job
