@@ -26,6 +26,10 @@ from huzhuan import (
     show_convert_menu, handle_convert_selection, handle_convert_document,
     FORMAT_CONVERT_BACK, user_convert_states
 )
+from zhuanapi import (
+    show_convert_api, handle_api_mode, handle_api_text, handle_api_document,
+    user_api_states, CONVERT_API_BACK
+)
 
 load_dotenv()
 TOKEN = os.getenv("BOT_TOKEN")
@@ -162,17 +166,20 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data in ["convert_session_to_tdata", "convert_tdata_to_session"]:
         await handle_convert_selection(update, context)
         
-    elif data in ["convert_api", "prevent_recovery", "check_ban", "check_material", "clean_account", "unpack_tool"]:
+    elif data == "convert_api":
+        await show_convert_api(update, context)
+        
+    elif data in ["api_no_2fa", "api_manual_2fa", "api_from_json"]:
+        await handle_api_mode(update, context)
+        
+    elif data in ["prevent_recovery", "check_ban", "check_material", "clean_account", "unpack_tool"]:
         keyboard = [[create_back_button()]]
         reply_markup = InlineKeyboardMarkup(keyboard)
         
         await query.edit_message_text(
             text="""<b><tg-emoji emoji-id='5881702736843511327'>⚠️</tg-emoji> 功能维护中</b>
 
-很抱歉，该功能正在升级维护，暂时无法使用。
-请稍后再试，感谢您的理解与支持！
-
-<tg-emoji emoji-id='5843553939672274145'>🕐</tg-emoji> 预计恢复时间：请关注通知""",
+<tg-emoji emoji-id='5843553939672274145'>🕐</tg-emoji> 请稍后再试""",
             parse_mode=ParseMode.HTML,
             reply_markup=reply_markup
         )
@@ -186,6 +193,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     if '2fa_state' in context.user_data:
         await handle_2fa_text_input(update, context)
+        return
+    
+    if user_id in user_api_states and user_api_states[user_id].get("waiting_2fa"):
+        await handle_api_text(update, context)
         return
     
     if user_data.get("status") != "vip":
@@ -204,7 +215,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup = InlineKeyboardMarkup(keyboard)
             
             await update.message.reply_text(
-                "<tg-emoji emoji-id='5886496611835581345'>❌</tg-emoji> 手机号格式错误，请重新发送",
+                "<tg-emoji emoji-id='5886496611835581345'>❌</tg-emoji> 手机号格式错误",
                 parse_mode='HTML',
                 reply_markup=reply_markup
             )
@@ -250,6 +261,10 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     if user_id in user_convert_states and user_convert_states[user_id].get("waiting_zip"):
         await handle_convert_document(update, context, user_id)
+        return
+    
+    if user_id in user_api_states and user_api_states[user_id].get("waiting_zip"):
+        await handle_api_document(update, context, user_id)
         return
     
     if user_data.get("status") != "vip":
@@ -508,6 +523,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 if __name__ == '__main__':
     os.makedirs("downloads", exist_ok=True)
+    os.makedirs("acd", exist_ok=True)
     cleanup_expired_orders()
     app = ApplicationBuilder().token(TOKEN).post_init(post_init).build()
     app.add_handler(CommandHandler("start", start))
