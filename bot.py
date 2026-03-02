@@ -22,6 +22,10 @@ from yinsi import (
     handle_privacy_confirm_upload, handle_privacy_reset_all, handle_privacy_document,
     user_privacy_states
 )
+from huzhuan import (
+    show_convert_menu, handle_convert_selection, handle_convert_document,
+    FORMAT_CONVERT_BACK, user_convert_states
+)
 
 load_dotenv()
 TOKEN = os.getenv("BOT_TOKEN")
@@ -152,8 +156,13 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data == "privacy_reset_all":
         await handle_privacy_reset_all(update, context)
         
-    elif data in ["format_convert", "convert_api", "prevent_recovery", 
-                "check_ban", "check_material", "clean_account", "unpack_tool"]:
+    elif data == "format_convert":
+        await show_convert_menu(update, context)
+        
+    elif data in ["convert_session_to_tdata", "convert_tdata_to_session"]:
+        await handle_convert_selection(update, context)
+        
+    elif data in ["convert_api", "prevent_recovery", "check_ban", "check_material", "clean_account", "unpack_tool"]:
         keyboard = [[create_back_button()]]
         reply_markup = InlineKeyboardMarkup(keyboard)
         
@@ -237,6 +246,10 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     if '2fa_state' in context.user_data and context.user_data['2fa_state'] == "waiting_2fa_zip":
         await handle_2fa_document(update, context)
+        return
+    
+    if user_id in user_convert_states and user_convert_states[user_id].get("waiting_zip"):
+        await handle_convert_document(update, context, user_id)
         return
     
     if user_data.get("status") != "vip":
