@@ -1,0 +1,305 @@
+import os
+import json
+import zipfile
+import shutil
+import tempfile
+import time
+import random
+import string
+import asyncio
+from datetime import datetime
+from telethon import TelegramClient
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.constants import ParseMode
+from telegram.ext import ContextTypes
+import logging
+
+logger = logging.getLogger(__name__)
+from dotenv import load_dotenv
+load_dotenv()
+
+CONVERT_API_BACK = os.getenv("CONVERT_API_BACK", "").replace('\\n', '\n')
+SERVER_IP = os.getenv("SERVER_IP")
+API_PORT = os.getenv("API_PORT", "7788")
+BACK_BUTTON_EMOJI_ID = "5877629862306385808"
+
+user_api_states = {}
+
+def create_back_button():
+    return InlineKeyboardButton(
+        "返回主菜单", 
+        callback_data="back_to_main"
+    ).to_dict() | {"icon_custom_emoji_id": BACK_BUTTON_EMOJI_ID}
+
+async def show_convert_api(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    keyboard = [
+        [InlineKeyboardButton("无2FA", callback_data="api_no_2fa")],
+        [InlineKeyboardButton("手动输入2FA", callback_data="api_manual_2fa")],
+        [InlineKeyboardButton("从JSON提取", callback_data="api_from_json")],
+        [create_back_button()]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    await query.edit_message_text(
+        text="请选择2FA处理方式：",
+        parse_mode=ParseMode.HTML,
+        reply_markup=reply_markup
+    )
+    
+    user_api_states[str(query.from_user.id)] = {"waiting_mode": True}
+
+async def handle_api_mode(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    user_id = str(query.from_user.id)
+    data = query.data
+    
+    await query.answer()
+    
+    if data == "api_no_2fa":
+        user_api_states[user_id] = {"mode": "no_2fa", "waiting_zip": True}
+        keyboard = [[create_back_button()]]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await query.edit_message_text(
+            text="请上传session ZIP包（无2FA）",
+            parse_mode=ParseMode.HTML,
+            reply_markup=reply_markup
+        )
+    
+    elif data == "api_manual_2fa":
+        user_api_states[user_id] = {"mode": "manual", "waiting_2fa": True}
+        keyboard = [[create_back_button()]]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await query.edit_message_text(
+            text="请输入2FA密码：",
+            parse_mode=ParseMode.HTML,
+            reply_markup=reply_markup
+        )
+    
+    elif data == "api_from_json":
+        user_api_states[user_id] = {"mode": "from_json", "waiting_zip": True}
+        keyboard = [[create_back_button()]]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await query.edit_message_text(
+            text="请上传session ZIP包（将自动从同目录JSON提取2FA和手机号）",
+            parse_mode=ParseMode.HTML,
+            reply_markup=reply_markup
+        )
+
+async def handle_api_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = str(update.effective_user.id)
+    text = update.message.text
+    
+    if user_id not in user_api_states or not user_api_states[user_id].get("waiting_2fa"):
+        return
+    
+    user_api_states[user_id]["two_fa"] = text.strip()
+    user_api_states[user_id]["waiting_2fa"] = False
+    user_api_states[user_id]["waiting_zip"] = True
+    
+    keyboard = [[create_back_button()]]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await update.message.reply_text(
+        "2FA已记录，请上传session ZIP包",
+        parse_mode=ParseMode.HTML,
+        reply_markup=reply_markup
+    )
+
+def generate_id():
+    return ''.join(random.choices(string.ascii_lowercase + string.digits, k=16))
+
+async def handle_api_document(update: Update, context: ContextTypes.DEFAULT_TYPE, user_id: str):
+    document = update.message.document
+    
+    if not document.file_name.endswith('.zip'):
+        keyboard = [[create_back_button()]]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await update.message.reply_text(
+            "<tg-emoji emoji-id='5778527486270770928'>❌</tg-emoji> 请上传ZIP格式",
+            parse_mode='HTML',
+            reply_markup=reply_markup
+        )
+        user_api_states.pop(user_id, None)
+        return
+    
+    status_msg = await update.message.reply_text(
+        "<tg-emoji emoji-id='5443127283898405358'>📥</tg-emoji> 正在下载文件...",
+        parse_mode='HTML'
+    )
+    
+    try:
+        file = await context.bot.get_file(document.file_id)
+        zip_path = f"downloads/api_{user_id}_{int(time.time())}.zip"
+        os.makedirs("downloads", exist_ok=True)
+        await file.download_to_drive(zip_path)
+        
+        await status_msg.edit_text(
+            "<tg-emoji emoji-id='5839200986022812209'>🔍</tg-emoji> 开始处理转换...",
+            parse_mode='HTML'
+        )
+        
+        mode = user_api_states[user_id].get("mode", "no_2fa")
+        two_fa = user_api_states[user_id].get("two_fa") if mode == "manual" else None
+        
+        await process_conversion(update, context, zip_path, user_id, mode, two_fa)
+        
+        try: os.remove(zip_path)
+        except: pass
+            
+    except Exception as e:
+        logger.error(f"处理失败: {e}")
+        keyboard = [[create_back_button()]]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await update.message.reply_text(
+            f"<tg-emoji emoji-id='5778527486270770928'>❌</tg-emoji> 处理失败: {str(e)[:50]}",
+            parse_mode='HTML',
+            reply_markup=reply_markup
+        )
+    finally:
+        user_api_states.pop(user_id, None)
+        try: await status_msg.delete()
+        except: pass
+
+async def process_conversion(update, context, zip_path, user_id, mode, manual_2fa=None):
+    api_id = int(os.getenv("TELEGRAM_APP_ID"))
+    api_hash = os.getenv("TELEGRAM_APP_HASH")
+    
+    with tempfile.TemporaryDirectory() as tmp:
+        extract_dir = os.path.join(tmp, "extracted")
+        os.makedirs(extract_dir)
+        
+        try:
+            with zipfile.ZipFile(zip_path, 'r') as zip_ref:
+                zip_ref.extractall(extract_dir)
+        except Exception as e:
+            keyboard = [[create_back_button()]]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            await context.bot.send_message(
+                chat_id=update.effective_chat.id,
+                text=f"<tg-emoji emoji-id='5778527486270770928'>❌</tg-emoji> 解压失败: {str(e)[:50]}",
+                parse_mode='HTML',
+                reply_markup=reply_markup
+            )
+            return
+        
+        session_files = []
+        json_files = {}
+        
+        for root, _, files in os.walk(extract_dir):
+            for f in files:
+                if f.endswith('.session'):
+                    session_files.append(os.path.join(root, f))
+                elif f.endswith('.json'):
+                    base = os.path.splitext(f)[0]
+                    json_files[base] = os.path.join(root, f)
+        
+        if not session_files:
+            keyboard = [[create_back_button()]]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            await context.bot.send_message(
+                chat_id=update.effective_chat.id,
+                text="<tg-emoji emoji-id='5778527486270770928'>❌</tg-emoji> 未找到session文件",
+                parse_mode='HTML',
+                reply_markup=reply_markup
+            )
+            return
+        
+        progress_msg = await context.bot.send_message(
+            chat_id=update.effective_chat.id,
+            text=f"<tg-emoji emoji-id='5839200986022812209'>🔄</tg-emoji> 处理中: 0/{len(session_files)}",
+            parse_mode='HTML'
+        )
+        
+        os.makedirs("acd", exist_ok=True)
+        api_data = {}
+        used_ids = set()
+        lines = []
+        
+        for i, session_path in enumerate(session_files, 1):
+            new_id = generate_id()
+            while new_id in used_ids:
+                new_id = generate_id()
+            used_ids.add(new_id)
+            
+            new_session = os.path.join("acd", f"{new_id}.session")
+            shutil.copy2(session_path, new_session)
+            
+            phone = "unknown"
+            two_fa = None
+            json_phone = None
+            
+            # 先从session获取手机号
+            client = TelegramClient(session_path, api_id, api_hash)
+            try:
+                await client.connect()
+                if await client.is_user_authorized():
+                    me = await client.get_me()
+                    if me and me.phone:
+                        phone = me.phone
+            except: pass
+            finally: await client.disconnect()
+            if mode == "manual":
+                two_fa = manual_2fa
+            elif mode == "from_json":
+                session_name = os.path.splitext(os.path.basename(session_path))[0]
+                json_path = json_files.get(session_name)
+                if json_path and os.path.exists(json_path):
+                    try:
+                        with open(json_path, 'r') as f:
+                            json_data = json.load(f)
+                            # 从JSON提取2FA
+                            two_fa = json_data.get('2fa') or json_data.get('2FA') or json_data.get('two_fa')
+                            # 从JSON提取手机号
+                            json_phone = json_data.get('phone') or json_data.get('Phone') or json_data.get('账号')
+                    except: pass
+            if phone == "unknown" and json_phone:
+                phone = json_phone
+            
+            api_data[new_id] = {
+                "phone": phone,
+                "two_fa": two_fa if two_fa else ""
+            }
+            
+            line = f"{phone} --- http://{SERVER_IP}:{API_PORT}/getcode?id={new_id}"
+            if two_fa:
+                line += f" (2FA: {two_fa})"
+            lines.append(line)
+            
+            if i % 5 == 0 or i == len(session_files):
+                try:
+                    await progress_msg.edit_text(
+                        f"<tg-emoji emoji-id='5839200986022812209'>🔄</tg-emoji> 处理中: {i}/{len(session_files)}",
+                        parse_mode='HTML'
+                    )
+                except: pass
+            
+            await asyncio.sleep(0.3)
+        
+        json_path = os.path.join("acd", "api.json")
+        with open(json_path, 'w') as f:
+            json.dump(api_data, f, indent=2)
+        
+        txt_path = os.path.join(tmp, "api_links.txt")
+        with open(txt_path, 'w') as f:
+            f.write("\n".join(lines))
+        
+        await progress_msg.delete()
+        
+        await context.bot.send_message(
+            chat_id=update.effective_chat.id,
+            text=f"""<tg-emoji emoji-id="5909201569898827582">✅</tg-emoji> <b>转换完成</b>
+
+<tg-emoji emoji-id="5931472654660800739">📊</tg-emoji> 总计: <b>{len(session_files)}</b>""",
+            parse_mode='HTML'
+        )
+        
+        with open(txt_path, 'rb') as f:
+            await context.bot.send_document(
+                chat_id=update.effective_chat.id,
+                document=f,
+                filename=f"api_links_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt",
+                caption=f'<b><tg-emoji emoji-id="5877540355187937244">📁</tg-emoji> API链接</b>',
+                parse_mode='HTML'
+            )
