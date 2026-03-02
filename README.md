@@ -21,4 +21,4 @@ pip install "python-telegram-bot[job-queue]"
 
 # 运行机器人
 
-python bot.py
+python start.py
