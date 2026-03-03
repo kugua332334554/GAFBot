@@ -10,8 +10,8 @@ from dotenv import load_dotenv
 load_dotenv()
 ACCOUNT_LOGIN_BACK = os.getenv("ACCOUNT_LOGIN_BACK")
 ADMIN_ID = os.getenv("ADMIN_ID")
-API_ID = int(os.getenv("API_ID", "2040"))
-API_HASH = os.getenv("API_HASH", "b18441a1ff607e10a989891a5462e627")
+API_ID = int(os.getenv("TELEGRAM_APP_ID", "2040"))
+API_HASH = os.getenv("TELEGRAM_APP_HASH", "b18441a1ff607e10a989891a5462e627")
 
 logger = logging.getLogger(__name__)
 
@@ -29,12 +29,21 @@ class LoginHandler:
         self.phone = phone
         self.session_file = f"sessions/{phone}.session"
         os.makedirs("sessions", exist_ok=True)
+        my_id_val = int(os.getenv("TELEGRAM_API_ID", 2040))
+        my_hash_val = str(os.getenv("TELEGRAM_APP_HASH", "b18441a1ff607e10a989891a5462e627")).strip()
+        self.client = TelegramClient(
+            self.session_file, 
+            api_id=my_id_val, 
+            api_hash=my_hash_val
+        )
         
-        self.client = TelegramClient(self.session_file, API_ID, API_HASH)
         await self.client.connect()
         
         try:
+            logger.info(f"Client API HASH internal type: {type(self.client.api_hash)}")
+            
             if not await self.client.is_user_authorized():
+                # 显式传递参数给 send_code_request
                 await self.client.send_code_request(phone)
                 await update.message.reply_text(
                     "<tg-emoji emoji-id='5877316724830768997'>📤</tg-emoji> 验证码已发送，请输入：",
