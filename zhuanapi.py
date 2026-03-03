@@ -21,6 +21,7 @@ load_dotenv()
 CONVERT_API_BACK = os.getenv("CONVERT_API_BACK", "").replace('\\n', '\n')
 SERVER_IP = os.getenv("SERVER_IP")
 API_PORT = os.getenv("API_PORT", "7788")
+DM = os.getenv("DM", "")
 BACK_BUTTON_EMOJI_ID = "5877629862306385808"
 
 user_api_states = {}
@@ -217,6 +218,11 @@ async def process_conversion(update, context, zip_path, user_id, mode, manual_2f
         used_ids = set()
         lines = []
         
+        # 构建API URL前缀
+        api_prefix = f"http://{SERVER_IP}:{API_PORT}"
+        if DM:
+            api_prefix = f"http://{DM}"
+        
         for i, session_path in enumerate(session_files, 1):
             new_id = generate_id()
             while new_id in used_ids:
@@ -262,7 +268,7 @@ async def process_conversion(update, context, zip_path, user_id, mode, manual_2f
                 "two_fa": two_fa if two_fa else ""
             }
             
-            line = f"{phone} --- http://{SERVER_IP}:{API_PORT}/getcode?id={new_id}"
+            line = f"{phone} --- {api_prefix}/getcode?id={new_id}"
             if two_fa:
                 line += f" (2FA: {two_fa})"
             lines.append(line)
