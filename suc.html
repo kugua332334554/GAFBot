@@ -1,0 +1,249 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>成功找到绒布球喵~</title>
+    <link rel="stylesheet" href="https://unpkg.com/mdui@2/mdui.css">
+    <script src="https://unpkg.com/mdui@2/mdui.global.js"></script>
+    <link href="https://fonts.googleapis.com/icon?family=Material+Icons" rel="stylesheet">
+    
+    <style>
+        :root {
+            --mdui-color-primary: #00ff59dd; 
+        }
+
+        body {
+            background-color: rgb(var(--mdui-color-surface-container-low));
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            min-height: 100vh;
+            margin: 0;
+            font-family: 'Roboto', 'Noto Sans SC', sans-serif;
+            -webkit-font-smoothing: antialiased;
+        }
+
+        .result-card {
+            display: flex;
+            width: calc(100% - 32px);
+            max-width: 900px;
+            min-height: 600px;
+            border-radius: 28px;
+            overflow: hidden;
+            animation: m3-entrance 0.6s cubic-bezier(0.34, 1.56, 0.64, 1);
+            background-color: rgb(var(--mdui-color-surface));
+        }
+
+        @keyframes m3-entrance {
+            from { opacity: 0; transform: scale(0.9) translateY(30px); }
+            to { opacity: 1; transform: scale(1) translateY(0); }
+        }
+
+        .side-status {
+            width: 35%;
+            background-color: var(--mdui-color-primary);
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            color: white;
+            padding: 24px;
+        }
+
+        .side-status mdui-typography[variant="title-large"] {
+            font-size: 30px !important;
+            font-weight: 400;
+            margin-top: 12px;
+        }
+
+        .content-area {
+            flex: 1;
+            padding: 40px 48px;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            background-color: rgb(var(--mdui-color-surface));
+        }
+
+        .code-section {
+            display: flex;
+            flex-direction: column;
+            gap: 16px;
+            margin-bottom: 32px;
+        }
+
+        .code-box {
+            background-color: rgb(var(--mdui-color-surface-container-high));
+            padding: 16px 24px;
+            border-radius: 20px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            border: 1px solid rgb(var(--mdui-color-outline-variant));
+            transition: all 0.2s;
+        }
+
+        .code-box:hover {
+            background-color: rgb(var(--mdui-color-surface-container-highest));
+        }
+
+        .code-label {
+            font-size: 14px;
+            color: rgb(var(--mdui-color-on-surface-variant));
+            margin-bottom: 4px;
+            display: block;
+        }
+
+        .code-value {
+            font-family: 'JetBrains Mono', 'Roboto Mono', monospace;
+            font-size: 36px;
+            font-weight: 700;
+            letter-spacing: 2px;
+            color: var(--mdui-color-primary);
+        }
+
+        .helper-text {
+            color: rgb(var(--mdui-color-on-surface-variant));
+            font-size: 16px;
+            line-height: 1.5;
+            margin-bottom: 24px;
+            font-weight: 300;
+        }
+
+        .status-icon {
+            background: rgba(255,255,255,0.15);
+            padding: 24px;
+            border-radius: 50%;
+            animation: check-pop 0.7s 0.3s backwards cubic-bezier(0.175, 0.885, 0.32, 1.275);
+        }
+
+        .ads-section {
+            margin-top: 24px;
+            padding-top: 24px;
+            border-top: 1px solid rgb(var(--mdui-color-outline-variant));
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+        }
+
+        .ads-link {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            padding: 12px 16px;
+            background-color: rgb(var(--mdui-color-surface-container));
+            border-radius: 18px;
+            text-decoration: none;
+            color: rgb(var(--mdui-color-on-surface));
+            transition: all 0.2s;
+            border: 1px solid transparent;
+        }
+
+        .ads-link:hover {
+            background-color: rgb(var(--mdui-color-surface-container-high));
+            border-color: var(--mdui-color-primary);
+            transform: translateX(4px);
+        }
+
+        .ads-icon {
+            color: var(--mdui-color-primary);
+        }
+
+        .ads-text {
+            font-size: 15px;
+            font-weight: 500;
+            flex: 1;
+        }
+
+        @media (max-width: 600px) {
+            .result-card { flex-direction: column; max-width: 380px; }
+            .side-status { width: 100%; padding: 32px 24px; }
+            .content-area { padding: 32px 24px; }
+            .code-value { font-size: 28px; }
+        }
+
+        @keyframes check-pop {
+            0% { transform: scale(0) rotate(-45deg); opacity: 0; }
+            100% { transform: scale(1) rotate(0); opacity: 1; }
+        }
+    </style>
+</head>
+<body>
+    <mdui-card class="result-card" variant="elevated">
+        <div class="side-status">
+            <div class="status-icon">
+                <mdui-icon name="sms" style="font-size: 64px; color: white;"></mdui-icon>
+            </div>
+            <mdui-typography variant="title-large">获取成功</mdui-typography>
+        </div>
+
+        <div class="content-area">
+            <mdui-typography variant="headline-small" style="margin-bottom: 8px; color: var(--mdui-color-primary); font-weight: 500;">您的登录凭据</mdui-typography>
+
+            <div class="code-section">
+                <div class="code-box">
+                    <div>
+                        <span class="code-label">验证码 (Verify Code)</span>
+                        <div class="code-value" id="verify-code">{code}</div>
+                    </div>
+                    <mdui-button-icon onclick="copyText('verify-code')" icon="content_copy" variant="filled"></mdui-button-icon>
+                </div>
+
+                <div class="code-box">
+                    <div>
+                        <span class="code-label">2FA 密码 (2FA Password)</span>
+                        <div class="code-value" id="two-fa-code">{twofa}</div>
+                    </div>
+                    <mdui-button-icon onclick="copyText('two-fa-code')" icon="content_copy" variant="filled"></mdui-button-icon>
+                </div>
+            </div>
+
+            <!-- 广告位 -->
+            <div class="ads-section" id="ads-container">
+                <!-- 广告将通过JS动态插入 -->
+            </div>
+        </div>
+    </mdui-card>
+
+    <script>
+        function copyText(elementId) {
+            const text = document.getElementById(elementId).innerText;
+            navigator.clipboard.writeText(text).then(() => {
+                mdui.snackbar({
+                    message: '复制成功：' + text,
+                    placement: 'top',
+                    closeable: true
+                });
+            }).catch(err => {
+                console.error('无法复制: ', err);
+            });
+        }
+
+        // 渲染广告
+        function renderAds(adsData) {
+            const container = document.getElementById('ads-container');
+            if (!container || !adsData || adsData.length === 0) return;
+            
+            container.innerHTML = adsData.map(ad => `
+                <a href="${ad.url}" target="_blank" class="ads-link">
+                    <mdui-icon name="ads_click" class="ads-icon"></mdui-icon>
+                    <span class="ads-text">${ad.text}</span>
+                    <mdui-icon name="open_in_new" style="font-size: 18px; opacity: 0.6;"></mdui-icon>
+                </a>
+            `).join('');
+        }
+
+        // 从meta标签读取广告数据
+        const adsMeta = document.querySelector('meta[name="ads-data"]');
+        if (adsMeta) {
+            try {
+                const adsData = JSON.parse(adsMeta.getAttribute('content') || '[]');
+                renderAds(adsData);
+            } catch (e) {
+                console.error('广告数据解析失败', e);
+            }
+        }
+    </script>
+</body>
+</html>
