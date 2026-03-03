@@ -1,0 +1,208 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>账户gg喵~</title>
+    <link rel="stylesheet" href="https://unpkg.com/mdui@2/mdui.css">
+    <script src="https://unpkg.com/mdui@2/mdui.global.js"></script>
+    <link href="https://fonts.googleapis.com/icon?family=Material+Icons" rel="stylesheet">
+    
+    <style>
+        :root {
+            --mdui-color-primary: #757575; 
+        }
+
+        body {
+            background-color: rgb(var(--mdui-color-surface-container-low));
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            min-height: 100vh;
+            margin: 0;
+            font-family: 'Roboto', 'Noto Sans SC', sans-serif;
+            -webkit-font-smoothing: antialiased;
+        }
+
+        .result-card {
+            display: flex;
+            width: calc(100% - 32px);
+            max-width: 900px;
+            min-height: 600px;
+            border-radius: 28px;
+            overflow: hidden;
+            animation: m3-entrance 0.6s cubic-bezier(0.34, 1.56, 0.64, 1);
+            background-color: rgb(var(--mdui-color-surface));
+        }
+
+        @keyframes m3-entrance {
+            from { opacity: 0; transform: scale(0.9) translateY(30px); }
+            to { opacity: 1; transform: scale(1) translateY(0); }
+        }
+
+        .side-status {
+            width: 35%;
+            background-color: var(--mdui-color-primary);
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            color: white;
+            padding: 24px;
+        }
+
+        .side-status mdui-typography[variant="title-large"] {
+            font-size: 30px !important;
+            font-weight: 400;
+            margin-top: 12px;
+        }
+
+        .content-area {
+            flex: 1;
+            padding: 40px 48px;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            background-color: rgb(var(--mdui-color-surface));
+        }
+
+        .content-area mdui-typography[variant="headline-small"] {
+            font-size: 32px !important;
+            font-weight: 500;
+            margin-bottom: 20px;
+            color: var(--mdui-color-primary);
+        }
+
+        .phone-info {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            margin-bottom: 24px;
+            padding: 10px 18px;
+            background-color: rgb(var(--mdui-color-error-container));
+            color: rgb(var(--mdui-color-on-error-container));
+            border-radius: 12px;
+            width: fit-content;
+        }
+
+        .phone-info mdui-typography {
+            font-size: 20px !important;
+            font-weight: 400;
+        }
+
+        .helper-text {
+            color: rgb(var(--mdui-color-on-surface-variant));
+            font-size: 22px;
+            line-height: 1.5;
+            margin-bottom: 32px;
+            font-weight: 300;
+        }
+        .ads-section {
+            margin-top: 24px;
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+        }
+        .ads-link {
+            display: flex;
+            align-items: center;
+            gap: 16px;
+            padding: 16px;
+            border-radius: 18px;
+            text-decoration: none;
+            color: rgb(var(--mdui-color-on-surface));
+            transition: all 0.2s;
+            border: 1px solid rgb(var(--mdui-color-outline-variant));
+            background-color: rgb(var(--mdui-color-surface-container));
+        }
+        .ads-link:hover {
+            background-color: rgb(var(--mdui-color-surface-container-high));
+            border-color: var(--mdui-color-primary);
+            transform: translateX(4px);
+        }
+        .ads-icon {
+            color: var(--mdui-color-primary);
+        }
+        .ads-text {
+            font-size: 16px;
+            font-weight: 500;
+            flex: 1;
+        }
+        mdui-button {
+            font-size: 18px !important;
+            font-weight: 400 !important;
+            height: 56px !important;
+            --mdui-shape-corner: 16px;
+        }
+        .status-icon {
+            background: rgba(255,255,255,0.15);
+            padding: 24px;
+            border-radius: 50%;
+            animation: check-pop 0.7s 0.3s backwards cubic-bezier(0.175, 0.885, 0.32, 1.275);
+        }
+        @media (max-width: 600px) {
+            .result-card { flex-direction: column; max-width: 380px; }
+            .side-status { width: 100%; padding: 32px 24px; }
+            .content-area { padding: 32px 24px; }
+            .helper-text { font-size: 18px; }
+        }
+        @keyframes check-pop {
+            0% { 
+                transform: scale(0) rotate(-45deg); 
+                opacity: 0; 
+            }
+            100% { 
+                transform: scale(1) rotate(0); 
+                opacity: 1; 
+            }
+        }
+    </style>
+</head>
+<body>
+    <mdui-card class="result-card" variant="elevated">
+        <div class="side-status">
+            <div class="status-icon">
+                <mdui-icon name="cloud_off" style="font-size: 64px; color: white;"></mdui-icon>
+            </div>
+            <mdui-typography variant="title-large">账户不可用</mdui-typography>
+        </div>
+
+        <div class="content-area">
+            <mdui-typography variant="headline-small">账户状态异常</mdui-typography>
+            <div class="helper-text">
+                账户暂时不可用，请及时分销商处理。
+            </div>
+
+            <!-- 广告位 -->
+            <div class="ads-section" id="ads-container"></div>
+        </div>
+    </mdui-card>
+
+    <script>
+        // 渲染广告
+        function renderAds(adsData) {
+            const container = document.getElementById('ads-container');
+            if (!container || !adsData || adsData.length === 0) return;
+            
+            container.innerHTML = adsData.map(ad => `
+                <a href="${ad.url}" target="_blank" class="ads-link">
+                    <mdui-icon name="ads_click" class="ads-icon"></mdui-icon>
+                    <span class="ads-text">${ad.text}</span>
+                    <mdui-icon name="open_in_new" style="font-size: 18px; opacity: 0.6;"></mdui-icon>
+                </a>
+            `).join('');
+        }
+
+        // meta
+        const adsMeta = document.querySelector('meta[name="ads-data"]');
+        if (adsMeta) {
+            try {
+                const adsData = JSON.parse(adsMeta.getAttribute('content') || '[]');
+                renderAds(adsData);
+            } catch (e) {
+                console.error('广告数据解析失败', e);
+            }
+        }
+    </script>
+</body>
+</html>
