@@ -22,3 +22,18 @@ pip install "python-telegram-bot[job-queue]"
 # 运行机器人
 
 python start.py
+
+
+# 域名Nginx反代配置实例
+
+server {
+    listen 80;
+    server_name 你的域名;
+    
+    location /getcode {
+        proxy_pass http://127.0.0.1:7788;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    }
+}
