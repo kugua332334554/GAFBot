@@ -63,11 +63,9 @@ logger = logging.getLogger(__name__)
 
 user_states = {}
 login_handlers = {}
-
-# 消息队列系统 - 使用更安全的实现
 user_queues = defaultdict(Queue)
-user_tasks = {}  # 存储每个用户的任务
-queue_locks = defaultdict(asyncio.Lock)  # 防止竞态条件
+user_tasks = {} 
+queue_locks = defaultdict(asyncio.Lock)
 
 def get_or_create_user(user):
     data = load_all_users()
