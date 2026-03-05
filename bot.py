@@ -31,6 +31,9 @@ from zhuanapi import (
     user_api_states, CONVERT_API_BACK
 )
 from qingli import show_clean_menu, handle_clean_selection, handle_clean_document, user_clean_states, CLEAN_ACCOUNT_BACK
+from shailiao import (
+    show_material_menu, handle_material_document, user_material_states
+)
 
 load_dotenv()
 TOKEN = os.getenv("BOT_TOKEN")
@@ -179,7 +182,10 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data in ["clean_chats", "clean_contacts", "clean_all"]:
         await handle_clean_selection(update, context)
         
-    elif data in ["prevent_recovery", "check_ban", "check_material", "unpack_tool"]:
+    elif data == "check_material":
+        await show_material_menu(update, context)
+        
+    elif data in ["prevent_recovery", "check_ban", "unpack_tool"]:
         keyboard = [[create_back_button()]]
         reply_markup = InlineKeyboardMarkup(keyboard)
         
@@ -261,6 +267,10 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     all_users = load_all_users()
     user_data = all_users.get(user_id, {})
+    
+    if user_id in user_material_states:
+        await handle_material_document(update, context, user_id)
+        return
     
     if '2fa_state' in context.user_data and context.user_data['2fa_state'] == "waiting_2fa_zip":
         await handle_2fa_document(update, context)
