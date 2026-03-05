@@ -2,7 +2,10 @@ import os
 import logging
 import re
 import time
+import asyncio
 from datetime import datetime
+from collections import defaultdict
+from asyncio import Queue
 from dotenv import load_dotenv
 from telegram import Update, BotCommand, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.constants import ParseMode, ChatMemberStatus
@@ -61,6 +64,10 @@ logger = logging.getLogger(__name__)
 user_states = {}
 login_handlers = {}
 
+# 消息队列系统
+user_queues = defaultdict(Queue)
+user_processing = defaultdict(bool)
+
 def get_or_create_user(user):
     data = load_all_users()
     user_id_str = str(user.id)
@@ -87,7 +94,51 @@ def create_back_button():
     ).to_dict() | {"icon_custom_emoji_id": BACK_BUTTON_EMOJI_ID}
     return back_button
 
+async def process_user_messages(user_id: str):
+    """按顺序处理用户的所有消息"""
+    try:
+        while not user_queues[user_id].empty():
+            msg_type, update, context = await user_queues[user_id].get()
+            
+            if msg_type == 'callback':
+                await process_button_callback(update, context)
+            elif msg_type == 'message':
+                await process_handle_message(update, context)
+            elif msg_type == 'document':
+                await process_handle_document(update, context)
+            
+            await asyncio.sleep(0)
+    finally:
+        if not user_queues[user_id].empty():
+            asyncio.create_task(process_user_messages(user_id))
+        else:
+            user_processing[user_id] = False
+            if user_queues[user_id].empty():
+                del user_queues[user_id]
+                del user_processing[user_id]
+
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = str(update.effective_user.id)
+    await user_queues[user_id].put(('callback', update, context))
+    if not user_processing[user_id]:
+        user_processing[user_id] = True
+        asyncio.create_task(process_user_messages(user_id))
+
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = str(update.effective_user.id)
+    await user_queues[user_id].put(('message', update, context))
+    if not user_processing[user_id]:
+        user_processing[user_id] = True
+        asyncio.create_task(process_user_messages(user_id))
+
+async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = str(update.effective_user.id)
+    await user_queues[user_id].put(('document', update, context))
+    if not user_processing[user_id]:
+        user_processing[user_id] = True
+        asyncio.create_task(process_user_messages(user_id))
+
+async def process_button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     user_id = str(query.from_user.id)
     data = query.data
@@ -202,22 +253,10 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=reply_markup
         )
         
-    elif data == "check_ban":
-        keyboard = [[create_back_button()]]
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        
-        await query.edit_message_text(
-            text="""<b><tg-emoji emoji-id='5881702736843511327'>⚠️</tg-emoji> 功能维护中</b>
-
-<tg-emoji emoji-id='5843553939672274145'>🕐</tg-emoji> 请稍后再试""",
-            parse_mode=ParseMode.HTML,
-            reply_markup=reply_markup
-        )
-        
     elif data == "unpack_tool":
         await show_unpack_menu(update, context)
 
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def process_handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = str(update.effective_user.id)
     text = update.message.text
     
@@ -286,7 +325,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 user_states.pop(user_id, None)
                 login_handlers.pop(user_id, None)
 
-async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def process_handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = str(update.effective_user.id)
     
     all_users = load_all_users()
