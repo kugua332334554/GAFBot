@@ -39,3 +39,18 @@ server {
     }
 }
 ```
+# 合作商品
+
+<div align="center">
+  <table border="0">
+    <tr>
+      <td align="center" bgcolor="#1a1a1a" style="border: 2px solid #d4af37; border-radius: 10px; padding: 20px;">
+        <p><b>✨ 尊贵合作伙伴 ✨</b></p>
+        <hr />
+        <img src="https://cdn5.telesco.pe/file/JjCEpdHdtXApXygCZSIxNb5hE79Iz1RqGJpvOMn4SjKMGWl0NB_Jecnl_ohdNSbla_w5OanHabmUymYrGa7F-cfZzTK2qGgyH-bCuHuKWvog03yzUIQsaNl3g_V9QzyYJE4DJyQWmsw315GvV7i2euk7IP6ZhASF_HPEYskUcBKQQq7Tj14CLumbdF0SdqfcTkw01p0A_80vQVpB6ipdVwvfsZURc8lWoT-akCZfcQ9yjZJCXCgsvq3qi3CtYuKl8I3fR3zRExIdsoI-hWSlOkICeeSB_fYIj3Wei4I7VP1W3e5aMaxqEBrs-8uBhQTe-u4GKfY4cuhc11a9kdFIZw.jpg" width="400">
+        <p><font color="#d4af37" size="5"><b>ROYAL PREMIUM SPONSOR</b></font></p>
+        <p><small>ESTABLISHED 2024</small></p>
+      </td>
+    </tr>
+  </table>
+</div>
