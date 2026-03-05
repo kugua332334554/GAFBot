@@ -35,6 +35,7 @@ from shailiao import (
     show_material_menu, handle_material_document, user_material_states
 )
 from chaibao import show_unpack_menu, handle_unpack_document, handle_unpack_format, user_unpack_states, UNPACK_TOOL_BACK
+from shaiban import show_check_ban, handle_ban_document, user_ban_states
 
 load_dotenv()
 TOKEN = os.getenv("BOT_TOKEN")
@@ -186,6 +187,9 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data == "check_material":
         await show_material_menu(update, context)
         
+    elif data == "check_ban":
+        await show_check_ban(update, context)
+        
     elif data == "prevent_recovery":
         keyboard = [[create_back_button()]]
         reply_markup = InlineKeyboardMarkup(keyboard)
@@ -288,8 +292,8 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     all_users = load_all_users()
     user_data = all_users.get(user_id, {})
     
-    if user_id in user_material_states:
-        await handle_material_document(update, context, user_id)
+    if user_id in user_ban_states:
+        await handle_ban_document(update, context, user_id)
         return
     
     if '2fa_state' in context.user_data and context.user_data['2fa_state'] == "waiting_2fa_zip":
