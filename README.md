@@ -48,8 +48,8 @@ server {
         <p><b>✨ 尊贵合作伙伴 ✨</b></p>
         <hr />
         <img src="https://cdn5.telesco.pe/file/JjCEpdHdtXApXygCZSIxNb5hE79Iz1RqGJpvOMn4SjKMGWl0NB_Jecnl_ohdNSbla_w5OanHabmUymYrGa7F-cfZzTK2qGgyH-bCuHuKWvog03yzUIQsaNl3g_V9QzyYJE4DJyQWmsw315GvV7i2euk7IP6ZhASF_HPEYskUcBKQQq7Tj14CLumbdF0SdqfcTkw01p0A_80vQVpB6ipdVwvfsZURc8lWoT-akCZfcQ9yjZJCXCgsvq3qi3CtYuKl8I3fR3zRExIdsoI-hWSlOkICeeSB_fYIj3Wei4I7VP1W3e5aMaxqEBrs-8uBhQTe-u4GKfY4cuhc11a9kdFIZw.jpg" width="400">
-        <p><font color="#d4af37" size="5"><b>ROYAL PREMIUM SPONSOR</b></font></p>
-        <p><small>ESTABLISHED 2024</small></p>
+        <p><font color="#d4af37" size="5"><b>MOBAI</b></font></p>
+        <p><small>Telegram @mo13ai</small></p>
       </td>
     </tr>
   </table>
