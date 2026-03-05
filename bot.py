@@ -34,6 +34,7 @@ from qingli import show_clean_menu, handle_clean_selection, handle_clean_documen
 from shailiao import (
     show_material_menu, handle_material_document, user_material_states
 )
+from chaibao import show_unpack_menu, handle_unpack_document, handle_unpack_format, user_unpack_states, UNPACK_TOOL_BACK
 
 load_dotenv()
 TOKEN = os.getenv("BOT_TOKEN")
@@ -185,7 +186,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data == "check_material":
         await show_material_menu(update, context)
         
-    elif data in ["prevent_recovery", "check_ban", "unpack_tool"]:
+    elif data == "prevent_recovery":
         keyboard = [[create_back_button()]]
         reply_markup = InlineKeyboardMarkup(keyboard)
         
@@ -196,6 +197,21 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode=ParseMode.HTML,
             reply_markup=reply_markup
         )
+        
+    elif data == "check_ban":
+        keyboard = [[create_back_button()]]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await query.edit_message_text(
+            text="""<b><tg-emoji emoji-id='5881702736843511327'>⚠️</tg-emoji> 功能维护中</b>
+
+<tg-emoji emoji-id='5843553939672274145'>🕐</tg-emoji> 请稍后再试""",
+            parse_mode=ParseMode.HTML,
+            reply_markup=reply_markup
+        )
+        
+    elif data == "unpack_tool":
+        await show_unpack_menu(update, context)
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = str(update.effective_user.id)
@@ -210,6 +226,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     if user_id in user_api_states and user_api_states[user_id].get("waiting_2fa"):
         await handle_api_text(update, context)
+        return
+    
+    if user_id in user_unpack_states and user_unpack_states[user_id].get("waiting_format"):
+        await handle_unpack_format(update, context)
         return
     
     if user_data.get("status") != "vip":
@@ -286,6 +306,10 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     if user_id in user_clean_states and user_clean_states[user_id].get("waiting_zip"):
         await handle_clean_document(update, context, user_id)
+        return
+    
+    if user_id in user_unpack_states and user_unpack_states[user_id].get("waiting_zip"):
+        await handle_unpack_document(update, context, user_id)
         return
     
     if user_data.get("status") != "vip":
