@@ -6,7 +6,6 @@ from flask import Flask, request
 import logging
 from dotenv import load_dotenv
 import re
-import time
 
 load_dotenv()
 
@@ -19,9 +18,7 @@ API_HASH = os.getenv("TELEGRAM_APP_HASH")
 API_PORT = int(os.getenv("API_PORT", "7788"))
 
 code_cache = {}
-client_connections = {}
 
-# 读取HTML模板
 def get_html_template(template_name):
     template_path = os.path.join(os.path.dirname(__file__), template_name)
     if os.path.exists(template_path):
@@ -63,11 +60,9 @@ def render_with_ads(template_name, **kwargs):
     ads_data = get_ads_from_env()
     ads_meta = json.dumps(ads_data, ensure_ascii=False)
     
-    # 替换变量
     for key, value in kwargs.items():
         template = template.replace(f'{{{key}}}', str(value))
     
-    # 插入广告meta数据
     meta_tag = f'<meta name="ads-data" content=\'{ads_meta}\'>'
     template = template.replace('<head>', f'<head>{meta_tag}')
     
@@ -84,11 +79,7 @@ def get_code():
         return render_with_ads('unavailable.html', error='Session不存在'), 404
     
     twofa = get_twofa_from_api(sid)
-    
-    if sid in code_cache:
-        code = code_cache[sid]
-    else:
-        code = fetch_code_sync(sid, session_path)
+    code = fetch_code_sync(sid, session_path)
     
     if code:
         return render_with_ads('suc.html', code=code, twofa=twofa)
@@ -102,16 +93,14 @@ def fetch_code_sync(sid, session_path):
             await client.connect()
             if not await client.is_user_authorized():
                 return None
-            
-            msgs = await client.get_messages(777000, limit=50)
+            msgs = await client.get_messages(777000, limit=20)
             for msg in msgs:
                 text = msg.message or ''
                 codes = re.findall(r'\d{5,6}', text)
                 if codes:
-                    code_cache[sid] = codes[0]
-                    logger.info(f"从历史消息获取验证码 {codes[0]} for {sid}")
-                    return codes[0]
-            
+                    latest_code = codes[0]
+                    logger.info(f"从历史消息获取最新验证码 {latest_code} for {sid}")
+                    return latest_code
             future = asyncio.Future()
             
             @client.on(events.NewMessage)
@@ -120,7 +109,6 @@ def fetch_code_sync(sid, session_path):
                     text = event.message.message or ''
                     codes = re.findall(r'\d{5,6}', text)
                     if codes and not future.done():
-                        code_cache[sid] = codes[0]
                         logger.info(f"从新消息获取验证码 {codes[0]} for {sid}")
                         future.set_result(codes[0])
                         await client.disconnect()
