@@ -30,6 +30,7 @@ from zhuanapi import (
     show_convert_api, handle_api_mode, handle_api_text, handle_api_document,
     user_api_states, CONVERT_API_BACK
 )
+from qingli import show_clean_menu, handle_clean_selection, handle_clean_document, user_clean_states, CLEAN_ACCOUNT_BACK
 
 load_dotenv()
 TOKEN = os.getenv("BOT_TOKEN")
@@ -172,7 +173,13 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data in ["api_no_2fa", "api_manual_2fa", "api_from_json"]:
         await handle_api_mode(update, context)
         
-    elif data in ["prevent_recovery", "check_ban", "check_material", "clean_account", "unpack_tool"]:
+    elif data == "clean_account":
+        await show_clean_menu(update, context)
+        
+    elif data in ["clean_chats", "clean_contacts", "clean_all"]:
+        await handle_clean_selection(update, context)
+        
+    elif data in ["prevent_recovery", "check_ban", "check_material", "unpack_tool"]:
         keyboard = [[create_back_button()]]
         reply_markup = InlineKeyboardMarkup(keyboard)
         
@@ -265,6 +272,10 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     if user_id in user_api_states and user_api_states[user_id].get("waiting_zip"):
         await handle_api_document(update, context, user_id)
+        return
+    
+    if user_id in user_clean_states and user_clean_states[user_id].get("waiting_zip"):
+        await handle_clean_document(update, context, user_id)
         return
     
     if user_data.get("status") != "vip":
