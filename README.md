@@ -39,7 +39,7 @@ server {
     }
 }
 ```
-# 合作商品
+# 合作商
 
 <div align="center">
   <table border="0">
