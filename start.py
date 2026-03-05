@@ -17,10 +17,7 @@ signal.signal(signal.SIGTERM, signal_handler)
 
 def start_process(script):
     return subprocess.Popen(
-        [sys.executable, script],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        universal_newlines=True
+        [sys.executable, script]
     )
 
 if __name__ == '__main__':
