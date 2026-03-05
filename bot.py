@@ -64,9 +64,10 @@ logger = logging.getLogger(__name__)
 user_states = {}
 login_handlers = {}
 
-# 消息队列系统
+# 消息队列系统 - 使用更安全的实现
 user_queues = defaultdict(Queue)
-user_processing = defaultdict(bool)
+user_tasks = {}  # 存储每个用户的任务
+queue_locks = defaultdict(asyncio.Lock)  # 防止竞态条件
 
 def get_or_create_user(user):
     data = load_all_users()
@@ -94,49 +95,81 @@ def create_back_button():
     ).to_dict() | {"icon_custom_emoji_id": BACK_BUTTON_EMOJI_ID}
     return back_button
 
-async def process_user_messages(user_id: str):
-    """按顺序处理用户的所有消息"""
+async def message_queue_processor(user_id: str):
     try:
-        while not user_queues[user_id].empty():
-            msg_type, update, context = await user_queues[user_id].get()
-            
-            if msg_type == 'callback':
-                await process_button_callback(update, context)
-            elif msg_type == 'message':
-                await process_handle_message(update, context)
-            elif msg_type == 'document':
-                await process_handle_document(update, context)
-            
-            await asyncio.sleep(0)
+        while True:
+            try:
+                msg_type, update, context = await asyncio.wait_for(
+                    user_queues[user_id].get(), 
+                    timeout=60
+                )
+                
+                try:
+                    if msg_type == 'callback':
+                        await process_button_callback(update, context)
+                    elif msg_type == 'message':
+                        await process_handle_message(update, context)
+                    elif msg_type == 'document':
+                        await process_handle_document(update, context)
+                except Exception as e:
+                    logger.error(f"处理用户 {user_id} 消息失败: {e}", exc_info=True)
+                    try:
+                        if update.callback_query:
+                            await update.callback_query.message.reply_text(
+                                "<tg-emoji emoji-id='5886496611835581345'>❌</tg-emoji> 处理失败，请重试",
+                                parse_mode=ParseMode.HTML
+                            )
+                        elif update.message:
+                            await update.message.reply_text(
+                                "<tg-emoji emoji-id='5886496611835581345'>❌</tg-emoji> 处理失败，请重试",
+                                parse_mode=ParseMode.HTML
+                            )
+                    except:
+                        pass
+                
+                user_queues[user_id].task_done()
+                
+            except asyncio.TimeoutError:
+                async with queue_locks[user_id]:
+                    if user_queues[user_id].empty():
+                        if user_id in user_tasks:
+                            del user_tasks[user_id]
+                        if user_id in user_queues and user_queues[user_id].empty():
+                            del user_queues[user_id]
+                        break
+                    continue
+            except asyncio.CancelledError:
+                logger.info(f"用户 {user_id} 的队列处理器被取消")
+                break
+            except Exception as e:
+                logger.error(f"队列处理器未知错误 {user_id}: {e}", exc_info=True)
+                continue
     finally:
-        if not user_queues[user_id].empty():
-            asyncio.create_task(process_user_messages(user_id))
-        else:
-            user_processing[user_id] = False
-            if user_queues[user_id].empty():
-                del user_queues[user_id]
-                del user_processing[user_id]
+        if user_id in queue_locks:
+            del queue_locks[user_id]
+
+async def ensure_queue_processor(user_id: str):
+    async with queue_locks[user_id]:
+        if user_id not in user_tasks or user_tasks[user_id].done():
+            user_tasks[user_id] = asyncio.create_task(
+                message_queue_processor(user_id),
+                name=f"queue_processor_{user_id}"
+            )
 
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = str(update.effective_user.id)
     await user_queues[user_id].put(('callback', update, context))
-    if not user_processing[user_id]:
-        user_processing[user_id] = True
-        asyncio.create_task(process_user_messages(user_id))
+    await ensure_queue_processor(user_id)
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = str(update.effective_user.id)
     await user_queues[user_id].put(('message', update, context))
-    if not user_processing[user_id]:
-        user_processing[user_id] = True
-        asyncio.create_task(process_user_messages(user_id))
+    await ensure_queue_processor(user_id)
 
 async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = str(update.effective_user.id)
     await user_queues[user_id].put(('document', update, context))
-    if not user_processing[user_id]:
-        user_processing[user_id] = True
-        asyncio.create_task(process_user_messages(user_id))
+    await ensure_queue_processor(user_id)
 
 async def process_button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
