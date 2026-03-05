@@ -26,6 +26,7 @@ python start.py
 
 # 域名Nginx反代配置实例
 
+```
 server {
     listen 80;
     server_name 你的域名;
@@ -37,3 +38,4 @@ server {
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
     }
 }
+```
