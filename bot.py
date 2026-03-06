@@ -75,11 +75,13 @@ def get_or_create_user(user):
     data = load_all_users()
     user_id_str = str(user.id)
     if user_id_str not in data:
+        # 如果 OKPAY_COST 为空，默认为 VIP
+        default_status = "vip" if not OKPAY_COST else "free"
         data[user_id_str] = {
             "id": user.id,
             "full_name": user.full_name,
             "username": user.username,
-            "status": "free"
+            "status": default_status
         }
         save_all_users(data)
     return data.get(user_id_str)
