@@ -39,6 +39,10 @@ from shailiao import (
 )
 from chaibao import show_unpack_menu, handle_unpack_document, handle_unpack_format, user_unpack_states, UNPACK_TOOL_BACK
 from shaiban import show_check_ban, handle_ban_document, user_ban_states
+from fangzhaohui import (
+    show_prevent_recovery, handle_recovery_document, handle_recovery_2fa_input,
+    handle_recovery_skip, user_recovery_states
+)
 
 load_dotenv()
 TOKEN = os.getenv("BOT_TOKEN")
@@ -273,19 +277,13 @@ async def process_button_callback(update: Update, context: ContextTypes.DEFAULT_
         await show_check_ban(update, context)
         
     elif data == "prevent_recovery":
-        keyboard = [[create_back_button()]]
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        
-        await query.edit_message_text(
-            text="""<b><tg-emoji emoji-id='5881702736843511327'>⚠️</tg-emoji> 功能维护中</b>
-
-<tg-emoji emoji-id='5843553939672274145'>🕐</tg-emoji> 请稍后再试""",
-            parse_mode=ParseMode.HTML,
-            reply_markup=reply_markup
-        )
+        await show_prevent_recovery(update, context)
         
     elif data == "unpack_tool":
         await show_unpack_menu(update, context)
+        
+    elif data == "recovery_skip_2fa":
+        await handle_recovery_skip(update, context)
 
 async def process_handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = str(update.effective_user.id)
@@ -293,6 +291,10 @@ async def process_handle_message(update: Update, context: ContextTypes.DEFAULT_T
     
     all_users = load_all_users()
     user_data = all_users.get(user_id, {})
+    
+    if user_id in user_recovery_states and user_recovery_states[user_id].get("state") == "waiting_2fa":
+        await handle_recovery_2fa_input(update, context)
+        return
     
     if '2fa_state' in context.user_data:
         await handle_2fa_text_input(update, context)
@@ -361,6 +363,10 @@ async def process_handle_document(update: Update, context: ContextTypes.DEFAULT_
     
     all_users = load_all_users()
     user_data = all_users.get(user_id, {})
+    
+    if user_id in user_recovery_states and user_recovery_states[user_id].get("state") == "waiting_zip":
+        await handle_recovery_document(update, context, user_id)
+        return
     
     if user_id in user_ban_states:
         await handle_ban_document(update, context, user_id)
