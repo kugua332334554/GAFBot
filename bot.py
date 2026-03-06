@@ -70,12 +70,13 @@ login_handlers = {}
 user_queues = defaultdict(Queue)
 user_tasks = {} 
 queue_locks = defaultdict(asyncio.Lock)
+broadcast_message = None
+broadcast_users = []
 
 def get_or_create_user(user):
     data = load_all_users()
     user_id_str = str(user.id)
     if user_id_str not in data:
-        # 如果 OKPAY_COST 为空，默认为 VIP
         default_status = "vip" if not OKPAY_COST else "free"
         data[user_id_str] = {
             "id": user.id,
@@ -575,6 +576,49 @@ async def remove_vip(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text(text, parse_mode=ParseMode.HTML)
 
+async def broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = str(update.effective_user.id)
+    if user_id != ADMIN_ID:
+        return
+    global broadcast_message, broadcast_users
+    broadcast_message = None
+    data = load_all_users()
+    broadcast_users = list(data.keys())
+    await update.message.reply_text(f"请输入要广播的消息内容，将发送给 {len(broadcast_users)} 个用户：")
+    context.user_data["awaiting_broadcast"] = True
+
+async def handle_broadcast_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = str(update.effective_user.id)
+    if user_id != ADMIN_ID or not context.user_data.get("awaiting_broadcast"):
+        return
+    global broadcast_message, broadcast_users
+    broadcast_message = update.message
+    context.user_data["awaiting_broadcast"] = False
+    await update.message.reply_text(f"开始广播，共 {len(broadcast_users)} 个用户，每秒20条...")
+    asyncio.create_task(send_broadcast(context))
+
+async def send_broadcast(context: ContextTypes.DEFAULT_TYPE):
+    global broadcast_message, broadcast_users
+    if not broadcast_message or not broadcast_users:
+        return
+    success = 0
+    fail = 0
+    for i, uid in enumerate(broadcast_users):
+        try:
+            await broadcast_message.copy(chat_id=uid)
+            success += 1
+        except Exception as e:
+            logger.error(f"广播失败 {uid}: {e}")
+            fail += 1
+        if (i + 1) % 20 == 0:
+            await asyncio.sleep(1)
+    await context.bot.send_message(
+        chat_id=ADMIN_ID,
+        text=f"广播完成：成功 {success}，失败 {fail}"
+    )
+    broadcast_message = None
+    broadcast_users = []
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     user_id = str(user.id)
@@ -672,7 +716,16 @@ if __name__ == '__main__':
     app.add_handler(CallbackQueryHandler(button_callback))
     app.add_handler(CommandHandler("vip", set_vip))
     app.add_handler(CommandHandler("unvip", remove_vip))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    app.add_handler(CommandHandler("gb", broadcast))
+    
+    async def text_message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        user_id = str(update.effective_user.id)
+        if user_id == ADMIN_ID and context.user_data.get("awaiting_broadcast"):
+            await handle_broadcast_message(update, context)
+        else:
+            await handle_message(update, context)
+    
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_message_handler))
     app.add_handler(MessageHandler(filters.Document.ALL, handle_document))
     app.job_queue.run_repeating(periodic_order_cleanup, interval=60, first=10)
     
