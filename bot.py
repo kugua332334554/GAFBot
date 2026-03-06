@@ -577,6 +577,21 @@ async def remove_vip(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
+    user_id = str(user.id)
+    user_states.pop(user_id, None)
+    login_handlers.pop(user_id, None)
+    user_merge_sessions.pop(user_id, None)
+    user_kick_states.pop(user_id, None)
+    user_bidirectional_states.pop(user_id, None)
+    user_privacy_states.pop(user_id, None)
+    user_convert_states.pop(user_id, None)
+    user_api_states.pop(user_id, None)
+    user_clean_states.pop(user_id, None)
+    user_material_states.pop(user_id, None)
+    user_ban_states.pop(user_id, None)
+    user_recovery_states.pop(user_id, None)
+    user_unpack_states.pop(user_id, None)
+    context.user_data.clear()
     
     if update.callback_query:
         message = update.callback_query.message
