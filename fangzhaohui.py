@@ -354,7 +354,7 @@ async def _process_recovery_internal(update, context, user_id, session_files, ex
 
 用户: <code>{user_id}</code>
 总账号: {len(session_files)}
-成功: {success_count} | 失败: {failed_count}""",
+<tg-emoji emoji-id="5920052658743283381">✅</tg-emoji>成功: {success_count} |<tg-emoji emoji-id="5922712343011135025">❌</tg-emoji> 失败: {failed_count}""",
                     parse_mode='HTML'
                 )
                 if success_zip:
