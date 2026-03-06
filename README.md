@@ -7,6 +7,14 @@ GAFBot是针对Telegram号商的多功能Bot。使用Python语言。
 
 <img width="617" height="346" alt="image" src="https://github.com/user-attachments/assets/999a6cae-d787-46f1-ad7a-87d75a231169" />
 
+# 管理员命名
+
+/vip + id 添加VIP
+
+/unvip + id 删除VIP
+
+/gb 发送广播
+
 
 # 部署
 1.上传源码
