@@ -22,6 +22,7 @@ class LoginHandler:
         self.phone = None
         self.client = None
         self.session_file = None
+        self.twofa = None
         self._lock = asyncio.Lock()
         self._retry_count = 0
         
@@ -43,7 +44,6 @@ class LoginHandler:
             logger.info(f"Client API HASH internal type: {type(self.client.api_hash)}")
             
             if not await self.client.is_user_authorized():
-                # 显式传递参数给 send_code_request
                 await self.client.send_code_request(phone)
                 await update.message.reply_text(
                     "<tg-emoji emoji-id='5877316724830768997'>📤</tg-emoji> 验证码已发送，请输入：",
@@ -97,6 +97,7 @@ class LoginHandler:
     async def handle_2fa(self, update, context, password):
         async with self._lock:
             try:
+                self.twofa = password
                 await self.client.sign_in(password=password)
                 await self.finish_login(update, context)
                 return True
@@ -110,18 +111,30 @@ class LoginHandler:
     async def finish_login(self, update, context):
         me = await self.client.get_me()
         
+        phone = self.phone
+        
         json_data = {
             "api_id": API_ID,
             "api_hash": API_HASH,
-            "user_id": str(me.id),
-            "phone": self.phone,
-            "username": me.username or "",
+            "system_lang_code": "es-mx",
+            "lang_code": "id",
+            "user_id": me.id,
+            "phone": phone,
+            "twofa": self.twofa if self.twofa else "",
+            "app_id": API_ID,
+            "app_hash": API_HASH,
             "session_file": os.path.basename(self.session_file).replace('.session', ''),
+            "username": me.username or "",
+            "ipv6": False,
+            "pref_cat": 2,
+            "block": False,
+            "system_lang_pack": "es-mx",
+            "premium": getattr(me, 'premium', False)
         }
         
         json_path = self.session_file.replace('.session', '.json')
         with open(json_path, 'w', encoding='utf-8') as f:
-            json.dump(json_data, f, indent=2)
+            json.dump(json_data, f, indent=2, ensure_ascii=False)
         
         zip_path = f"downloads/login_{self.user_id}_{int(asyncio.get_event_loop().time())}.zip"
         os.makedirs("downloads", exist_ok=True)
