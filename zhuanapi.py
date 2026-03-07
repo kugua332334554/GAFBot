@@ -20,7 +20,7 @@ load_dotenv()
 
 CONVERT_API_BACK = os.getenv("CONVERT_API_BACK", "").replace('\\n', '\n')
 SERVER_IP = os.getenv("SERVER_IP")
-API_PORT = os.getenv("API_PORT", "7788")
+API_PORT = os.getenv("API_PORT", "5099")
 DM = os.getenv("DM", "")
 BACK_BUTTON_EMOJI_ID = "5877629862306385808"
 
@@ -314,7 +314,6 @@ async def process_conversion(update, context, zip_path, user_id, mode, manual_2f
             proxy = get_random_proxy()
             proxy_dict = create_proxy_dict(proxy) if proxy else None
             
-            # 带代理的TelegramClient
             client = TelegramClient(session_path, api_id, api_hash, proxy=proxy_dict)
             try:
                 await client.connect()
@@ -334,11 +333,21 @@ async def process_conversion(update, context, zip_path, user_id, mode, manual_2f
                 json_path = json_files.get(session_name)
                 if json_path and os.path.exists(json_path):
                     try:
-                        with open(json_path, 'r') as f:
+                        with open(json_path, 'r', encoding='utf-8') as f:
                             json_data = json.load(f)
-                            two_fa = json_data.get('2fa') or json_data.get('2FA') or json_data.get('two_fa')
-                            json_phone = json_data.get('phone') or json_data.get('Phone') or json_data.get('账号')
-                    except: pass
+                            two_fa = (json_data.get('2fa') or 
+                                     json_data.get('2FA') or 
+                                     json_data.get('two_fa') or 
+                                     json_data.get('password') or  
+                                     json_data.get('twofa'))      
+                            
+                            json_phone = (json_data.get('phone') or 
+                                         json_data.get('Phone') or 
+                                         json_data.get('账号') or
+                                         json_data.get('电话号码') or  
+                                         json_data.get('手机号'))      
+                    except Exception as e:
+                        logger.debug(f"读取JSON失败 {json_path}: {e}")
             
             if phone == "unknown" and json_phone:
                 phone = json_phone
@@ -364,11 +373,11 @@ async def process_conversion(update, context, zip_path, user_id, mode, manual_2f
             await asyncio.sleep(0.3)
         
         json_path = os.path.join("acd", "api.json")
-        with open(json_path, 'w') as f:
-            json.dump(api_data, f, indent=2)
+        with open(json_path, 'w', encoding='utf-8') as f:
+            json.dump(api_data, f, indent=2, ensure_ascii=False)
         
         txt_path = os.path.join(tmp, "api_links.txt")
-        with open(txt_path, 'w') as f:
+        with open(txt_path, 'w', encoding='utf-8') as f:
             f.write("\n".join(lines))
         
         await progress_msg.delete()
