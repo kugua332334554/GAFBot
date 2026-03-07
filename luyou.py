@@ -2,10 +2,13 @@ import os
 import json
 import asyncio
 from telethon import TelegramClient, events
+from telethon.network.connection.tcpabridged import ConnectionTcpAbridged
+from telethon.sessions import StringSession
 from flask import Flask, request
 import logging
 from dotenv import load_dotenv
 import re
+import socks
 
 load_dotenv()
 
@@ -17,7 +20,24 @@ API_ID = int(os.getenv("TELEGRAM_APP_ID"))
 API_HASH = os.getenv("TELEGRAM_APP_HASH")
 API_PORT = int(os.getenv("API_PORT", "7788"))
 
+# 代理配置
+PROXY_TYPE = os.getenv("PROXY_TYPE", "socks5")
+PROXY_HOST = os.getenv("PROXY_HOST")
+PROXY_PORT = int(os.getenv("PROXY_PORT", "0")) if os.getenv("PROXY_PORT") else None
+PROXY_USER = os.getenv("PROXY_USER", "")
+PROXY_PASS = os.getenv("PROXY_PASS", "")
+
 code_cache = {}
+
+def get_proxy():
+    """获取代理配置"""
+    if not PROXY_HOST or not PROXY_PORT:
+        return None
+    
+    proxy_type = socks.SOCKS5 if PROXY_TYPE.lower() == 'socks5' else socks.HTTP
+    if PROXY_USER and PROXY_PASS:
+        return (proxy_type, PROXY_HOST, PROXY_PORT, True, PROXY_USER, PROXY_PASS)
+    return (proxy_type, PROXY_HOST, PROXY_PORT)
 
 def get_html_template(template_name):
     template_path = os.path.join(os.path.dirname(__file__), template_name)
@@ -88,7 +108,14 @@ def get_code():
 
 def fetch_code_sync(sid, session_path):
     async def _fetch():
-        client = TelegramClient(session_path, API_ID, API_HASH)
+        proxy = get_proxy()
+        client = TelegramClient(
+            session_path, 
+            API_ID, 
+            API_HASH,
+            connection=ConnectionTcpAbridged,
+            proxy=proxy
+        )
         try:
             await client.connect()
             if not await client.is_user_authorized():
