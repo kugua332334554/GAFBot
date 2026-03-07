@@ -5,6 +5,7 @@ import tempfile
 import time
 import json
 import asyncio
+import random
 from datetime import datetime
 from telethon import TelegramClient
 from telethon.errors import FloodWaitError
@@ -22,7 +23,83 @@ MAX_EXTRACT_SIZE = int(os.getenv("MK_TIME", 4)) * 1024 * 1024
 MAX_TASK_TIME = int(os.getenv("MK_LIST_TIME", "120").replace('S', ''))
 BACK_BUTTON_EMOJI_ID = "5877629862306385808"
 
+_proxy_list = None
+_proxy_list_last_load = 0
+PROXY_LIST_CACHE_TIME = 60
+
 user_clean_states = {}
+
+def load_proxies():
+    global _proxy_list, _proxy_list_last_load
+    
+    current_time = time.time()
+    if _proxy_list is not None and (current_time - _proxy_list_last_load) < PROXY_LIST_CACHE_TIME:
+        return _proxy_list
+    
+    proxy_file = "proxy.txt"
+    valid_proxies = []
+    
+    if not os.path.exists(proxy_file):
+        logger.warning("proxy.txt 文件不存在")
+        _proxy_list = []
+        _proxy_list_last_load = current_time
+        return []
+    
+    try:
+        with open(proxy_file, 'r', encoding='utf-8') as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith('#'):
+                    continue
+                
+                parts = line.split(':')
+                if len(parts) >= 5:
+                    ip, port, username, password, expire_ts = parts[:5]
+                    try:
+                        expire_timestamp = int(expire_ts)
+                        if current_time < expire_timestamp:
+                            proxy = {
+                                'ip': ip,
+                                'port': int(port),
+                                'username': username,
+                                'password': password,
+                                'expire': expire_timestamp
+                            }
+                            valid_proxies.append(proxy)
+                        else:
+                            logger.debug(f"代理 {ip}:{port} 已过期")
+                    except ValueError:
+                        logger.warning(f"代理过期时间格式错误: {expire_ts}")
+                        continue
+    
+    except Exception as e:
+        logger.error(f"读取 proxy.txt 失败: {e}")
+        _proxy_list = []
+        _proxy_list_last_load = current_time
+        return []
+    
+    _proxy_list = valid_proxies
+    _proxy_list_last_load = current_time
+    logger.info(f"加载了 {len(valid_proxies)} 个有效代理")
+    return valid_proxies
+
+def get_random_proxy():
+    proxies = load_proxies()
+    if not proxies:
+        return None
+    return random.choice(proxies)
+
+def create_proxy_dict(proxy):
+    if not proxy:
+        return None
+    return {
+        'proxy_type': 'http',
+        'addr': proxy['ip'],
+        'port': proxy['port'],
+        'username': proxy['username'],
+        'password': proxy['password'],
+        'rdns': True
+    }
 
 def create_back_button():
     return InlineKeyboardButton(
@@ -316,7 +393,10 @@ async def _process_clean_internal(update, context, zip_path, user_id, api_id, ap
             
             client = None
             try:
-                client = TelegramClient(session_file, api_id, api_hash)
+                proxy = get_random_proxy()
+                proxy_dict = create_proxy_dict(proxy) if proxy else None
+                
+                client = TelegramClient(session_file, api_id, api_hash, proxy=proxy_dict)
                 await client.connect()
                 
                 if not await client.is_user_authorized():
