@@ -367,6 +367,7 @@ async def process_handle_document(update: Update, context: ContextTypes.DEFAULT_
     all_users = load_all_users()
     user_data = all_users.get(user_id, {})
     
+    # 优先处理特殊状态
     if user_id in user_recovery_states and user_recovery_states[user_id].get("state") == "waiting_zip":
         await handle_recovery_document(update, context, user_id)
         return
@@ -400,6 +401,7 @@ async def process_handle_document(update: Update, context: ContextTypes.DEFAULT_
         return
     
     state = user_states.get(user_id)
+    
     if state == "waiting_shaihuo":
         await handle_shaihuo_document(update, context, user_id, user_states)
     elif state == "waiting_merge_packs":
@@ -410,6 +412,16 @@ async def process_handle_document(update: Update, context: ContextTypes.DEFAULT_
         await handle_bidirectional_document(update, context, user_id)
     elif user_id in user_privacy_states and user_privacy_states[user_id].get("waiting_zip"):
         await handle_privacy_document(update, context, user_id)
+    elif state == "waiting_material_zip" or user_id in user_material_states:
+        await handle_material_document(update, context, user_id)
+    else:
+        keyboard = [[create_back_button()]]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await update.message.reply_text(
+            "<tg-emoji emoji-id='5778527486270770928'>❌</tg-emoji> 请先选择功能再上传文件",
+            parse_mode='HTML',
+            reply_markup=reply_markup
+        )
 
 async def check_pay_status(context: ContextTypes.DEFAULT_TYPE):
     job = context.job
