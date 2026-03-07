@@ -24,7 +24,82 @@ API_PORT = os.getenv("API_PORT", "7788")
 DM = os.getenv("DM", "")
 BACK_BUTTON_EMOJI_ID = "5877629862306385808"
 
+# 代理相关全局变量
+_proxy_list = None
+_proxy_list_last_load = 0
+PROXY_LIST_CACHE_TIME = 60
+
 user_api_states = {}
+
+def load_proxies():
+    global _proxy_list, _proxy_list_last_load
+    
+    current_time = time.time()
+    if _proxy_list is not None and (current_time - _proxy_list_last_load) < PROXY_LIST_CACHE_TIME:
+        return _proxy_list
+    
+    proxy_file = "proxy.txt"
+    valid_proxies = []
+    
+    if not os.path.exists(proxy_file):
+        logger.warning("proxy.txt 文件不存在")
+        _proxy_list = []
+        _proxy_list_last_load = current_time
+        return []
+    
+    try:
+        with open(proxy_file, 'r', encoding='utf-8') as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith('#'):
+                    continue
+                
+                parts = line.split(':')
+                if len(parts) >= 5:
+                    ip, port, username, password, expire_ts = parts[:5]
+                    try:
+                        expire_timestamp = int(expire_ts)
+                        if current_time < expire_timestamp:
+                            proxy = {
+                                'ip': ip,
+                                'port': int(port),
+                                'username': username,
+                                'password': password,
+                                'expire': expire_timestamp
+                            }
+                            valid_proxies.append(proxy)
+                        else:
+                            logger.debug(f"代理 {ip}:{port} 已过期")
+                    except ValueError:
+                        logger.warning(f"代理过期时间格式错误: {expire_ts}")
+                        continue
+    
+    except Exception as e:
+        logger.error(f"读取 proxy.txt 失败: {e}")
+        _proxy_list = []
+        _proxy_list_last_load = current_time
+        return []
+    
+    _proxy_list = valid_proxies
+    _proxy_list_last_load = current_time
+    logger.info(f"加载了 {len(valid_proxies)} 个有效代理")
+    return valid_proxies
+
+def get_random_proxy():
+    proxies = load_proxies()
+    if not proxies:
+        return None
+    return random.choice(proxies)
+
+def create_proxy_dict(proxy):
+    return {
+        'proxy_type': 'http',
+        'addr': proxy['ip'],
+        'port': proxy['port'],
+        'username': proxy['username'],
+        'password': proxy['password'],
+        'rdns': True
+    }
 
 def create_back_button():
     return InlineKeyboardButton(
@@ -218,7 +293,6 @@ async def process_conversion(update, context, zip_path, user_id, mode, manual_2f
         used_ids = set()
         lines = []
         
-        # 构建API URL前缀
         api_prefix = f"http://{SERVER_IP}:{API_PORT}"
         if DM:
             api_prefix = f"http://{DM}"
@@ -236,16 +310,23 @@ async def process_conversion(update, context, zip_path, user_id, mode, manual_2f
             two_fa = None
             json_phone = None
             
-            # 先从session获取手机号
-            client = TelegramClient(session_path, api_id, api_hash)
+            # 获取随机代理
+            proxy = get_random_proxy()
+            proxy_dict = create_proxy_dict(proxy) if proxy else None
+            
+            # 带代理的TelegramClient
+            client = TelegramClient(session_path, api_id, api_hash, proxy=proxy_dict)
             try:
                 await client.connect()
                 if await client.is_user_authorized():
                     me = await client.get_me()
                     if me and me.phone:
                         phone = me.phone
-            except: pass
-            finally: await client.disconnect()
+            except Exception as e:
+                logger.debug(f"获取手机号失败 {session_path}: {e}")
+            finally: 
+                await client.disconnect()
+            
             if mode == "manual":
                 two_fa = manual_2fa
             elif mode == "from_json":
@@ -255,11 +336,10 @@ async def process_conversion(update, context, zip_path, user_id, mode, manual_2f
                     try:
                         with open(json_path, 'r') as f:
                             json_data = json.load(f)
-                            # 从JSON提取2FA
                             two_fa = json_data.get('2fa') or json_data.get('2FA') or json_data.get('two_fa')
-                            # 从JSON提取手机号
                             json_phone = json_data.get('phone') or json_data.get('Phone') or json_data.get('账号')
                     except: pass
+            
             if phone == "unknown" and json_phone:
                 phone = json_phone
             
