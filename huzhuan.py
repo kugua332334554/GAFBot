@@ -496,4 +496,3 @@ async def process_tdata_to_session(update: Update, context: ContextTypes.DEFAULT
             await status_msg.delete()
         except:
             pass
-0
