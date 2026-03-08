@@ -25,7 +25,7 @@ GAFBot是针对Telegram号商的多功能Bot。使用Python语言。
 
 # 安装依赖
 
-pip install Flask python-dotenv python-telegram-bot requests telethon PySocks cryptg opentelemetry-api opentelemetry-sdk
+pip install Flask python-dotenv python-telegram-bot requests telethon PySocks cryptg opentele pyqt5
 
 pip install "python-telegram-bot[job-queue]"
 
