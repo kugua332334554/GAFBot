@@ -385,15 +385,22 @@ async def process_tdata_to_session(update: Update, context: ContextTypes.DEFAULT
         except Exception as e:
             raise Exception(f"解压失败: {e}")
         
-        tdata_dirs = []
+        tdata_dirs = set()
         for root, dirs, files in os.walk(extract_dir):
             if os.path.basename(root) == 'tdata':
-                tdata_dirs.append(root)
+                if any(f in files for f in ['key_datas', 'map']):
+                    tdata_dirs.add(root)
             elif 'tdata' in dirs:
-                tdata_dirs.append(os.path.join(root, 'tdata'))
+                potential_tdata = os.path.join(root, 'tdata')
+                if os.path.exists(potential_tdata):
+                    sub_files = os.listdir(potential_tdata)
+                    if any(f in sub_files for f in ['key_datas', 'map']):
+                        tdata_dirs.add(potential_tdata)
+        
+        tdata_dirs = list(tdata_dirs)
         
         if not tdata_dirs:
-            raise Exception("未找到tdata文件夹")
+            raise Exception("未找到有效的tdata文件夹")
         
         status_msg = await context.bot.send_message(
             chat_id=update.effective_chat.id,
@@ -470,7 +477,7 @@ async def process_tdata_to_session(update: Update, context: ContextTypes.DEFAULT
                     chat_id=update.effective_chat.id,
                     document=f,
                     filename=zip_filename,
-                    caption=f"<b>✅ Tdata转Session完成 ({success_count}个)</b>",
+                    caption=f"<b><tg-emoji emoji-id='5920052658743283381'>✅</tg-emoji> Tdata转Session完成 ({success_count}个)</b>",
                     parse_mode='HTML'
                 )
         
@@ -489,3 +496,4 @@ async def process_tdata_to_session(update: Update, context: ContextTypes.DEFAULT
             await status_msg.delete()
         except:
             pass
+0
