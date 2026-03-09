@@ -103,41 +103,38 @@ async def check_session_alive(session_file, json_file, api_id, api_hash):
         proxy = get_random_proxy()
         if proxy:
             proxy_to_use = create_proxy_dict(proxy)
-            logger.debug(f"使用代理: {proxy['ip']}:{proxy['port']} 检查 {os.path.basename(session_file)}")
             client = TelegramClient(session_file, api_id, api_hash, proxy=proxy_to_use)
         else:
-            logger.debug(f"无可用代理，直连检查 {os.path.basename(session_file)}")
             client = TelegramClient(session_file, api_id, api_hash)
         
         await client.connect()
-        
         if not await client.is_user_authorized():
             return False, "验证失效"
-        
         me = await client.get_me()
         if not me:
             return False, "无法获取用户信息"
-        
         try:
-            user = await client.get_entity('@aaaa')
-            if user:
-                return True, "存活"
-        except UsernameNotOccupiedError:
+            from telethon.tl.functions.account import GetPrivacyRequest
+            from telethon.tl.types import InputPrivacyKeyPhoneNumber
+            
+            privacy = await client(GetPrivacyRequest(InputPrivacyKeyPhoneNumber()))
             return True, "存活"
-        except FloodWaitError as e:
-            return False, f"等待{e.seconds}秒"
+            
         except Exception as e:
             error_str = str(e).lower()
-            if "cannot find" in error_str or "username not found" in error_str:
-                return True, "存活"
-            elif "deactivated" in error_str or "banned" in error_str:
-                return False, "账号被封"
-            elif "flood" in error_str:
-                return False, "触发限流"
-            elif "peer_id_invalid" in error_str or "invite" in error_str:
+            if any(x in error_str for x in [
+                'frozen', 
+                'peer_id_invalid', 
+                'invite', 
+                'forbidden', 
+                'access',
+                'PRIVACY_KEY_INVALID',
+                'USER_PRIVACY_RESTRICTED'
+            ]):
+                logger.info(f"账号 {os.path.basename(session_file)} 检测到冻结特征: {type(e).__name__}")
                 return True, "冻结"
             else:
-                return True, "冻结"
+                return False, f"错误:{str(e)[:20]}"
         
     except SessionPasswordNeededError:
         return False, "2FA验证"
