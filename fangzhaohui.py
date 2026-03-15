@@ -270,21 +270,32 @@ async def process_recovery_task(update: Update, context: ContextTypes.DEFAULT_TY
     )
     
     result_temp = None
+    task = None
     
     try:
         result_temp = tempfile.mkdtemp()
         
-        await asyncio.wait_for(
-            _process_recovery_internal(update, context, user_id, session_files, extract_dir, two_fa, status_msg, result_temp),
-            timeout=MAX_TASK_TIME
+        task = asyncio.create_task(
+            _process_recovery_internal(update, context, user_id, session_files, extract_dir, two_fa, status_msg, result_temp)
         )
+        
+        await asyncio.wait_for(task, timeout=MAX_TASK_TIME)
+        
     except asyncio.TimeoutError:
+        if task and not task.done():
+            task.cancel()
+            try:
+                await task
+            except:
+                pass
+        
         await context.bot.send_message(
             chat_id=update.effective_chat.id,
-            text=f"<tg-emoji emoji-id='5778527486270770928'>❌</tg-emoji> 任务执行超时 ({MAX_TASK_TIME}秒)",
+            text=f"<tg-emoji emoji-id='5778527486270770928'>⚠️</tg-emoji> 任务执行超时 ({MAX_TASK_TIME}秒)，但已完成的账号会继续发送",
             parse_mode='HTML',
             reply_markup=InlineKeyboardMarkup([[create_back_button()]])
         )
+        
     except Exception as e:
         await context.bot.send_message(
             chat_id=update.effective_chat.id,
