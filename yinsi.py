@@ -111,6 +111,7 @@ def create_back_button():
 
 def create_button(text, callback_data, emoji_id):
     return InlineKeyboardButton(text, callback_data=callback_data).to_dict() | {"icon_custom_emoji_id": emoji_id}
+
 privacy_settings = {
     "phone": {"name": "手机号", "key": InputPrivacyKeyPhoneNumber, "icon_custom_emoji_id": "5877316724830768997"},
     "last_seen": {"name": "最后在线时间", "key": InputPrivacyKeyStatusTimestamp, "icon_custom_emoji_id": "5843457994397849034"},
@@ -392,12 +393,41 @@ async def check_session_privacy(session_file, json_file, api_id, api_hash, priva
         "status": "unknown",
         "message": "",
     }
+    json_config = {}
+    if json_file and os.path.exists(json_file):
+        try:
+            with open(json_file, 'r', encoding='utf-8') as f:
+                json_config = json.load(f)
+        except Exception as e:
+            logger.warning(f"读取 JSON 配置失败 {json_file}: {e}")
+    
+    final_api_id = api_id
+    final_api_hash = api_hash
+    if json_config:
+        if 'app_id' in json_config and json_config['app_id']:
+            try:
+                final_api_id = int(json_config['app_id'])
+            except (ValueError, TypeError):
+                logger.warning(f"无效的 app_id: {json_config['app_id']}, 使用默认值")
+        if 'app_hash' in json_config and json_config['app_hash']:
+            final_api_hash = str(json_config['app_hash'])
+    device_model = json_config.get('device') or None
+    app_version = json_config.get('app_version') or None
+    system_lang_code = json_config.get('system_lang_pack') or None
     
     proxy = get_random_proxy()
     proxy_dict = create_proxy_dict(proxy) if proxy else None
     
     try:
-        client = TelegramClient(session_file, api_id, api_hash, proxy=proxy_dict)
+        client = TelegramClient(
+            session_file,
+            final_api_id,
+            final_api_hash,
+            proxy=proxy_dict,
+            device_model=device_model,
+            app_version=app_version,
+            system_lang_code=system_lang_code
+        )
         await client.connect()
         
         if not await client.is_user_authorized():
