@@ -137,20 +137,54 @@ async def check_session_kick(session_file, json_file, api_id, api_hash):
         "message": ""
     }
     
+    json_2fa = None
+    json_app_id = None
+    json_app_hash = None
+    device_model = None
+    app_version = None
+    system_lang_code = None
+    
+    if json_file and os.path.exists(json_file):
+        try:
+            with open(json_file, 'r', encoding='utf-8') as f:
+                json_data = json.load(f)
+                json_2fa = json_data.get('2fa') or json_data.get('2FA') or json_data.get('password')
+                json_app_id = json_data.get('app_id')
+                json_app_hash = json_data.get('app_hash')
+                device_model = json_data.get('device')
+                app_version = json_data.get('app_version')
+                system_lang_code = json_data.get('system_lang_pack')
+        except Exception as e:
+            pass
+    
+    final_api_id = api_id
+    final_api_hash = api_hash
+    if json_app_id:
+        try:
+            final_api_id = int(json_app_id)
+        except (ValueError, TypeError):
+            logger.warning(f"无效的 app_id: {json_app_id}, 使用默认值")
+    if json_app_hash:
+        final_api_hash = str(json_app_hash)
+    
+    proxy = get_random_proxy()
+    proxy_dict = create_proxy_dict(proxy) if proxy else None
+    
     try:
-        json_2fa = None
-        if json_file and os.path.exists(json_file):
-            try:
-                with open(json_file, 'r', encoding='utf-8') as f:
-                    json_data = json.load(f)
-                    json_2fa = json_data.get('2fa') or json_data.get('2FA') or json_data.get('password')
-            except:
-                pass
+        client_kwargs = {
+            'api_id': final_api_id,
+            'api_hash': final_api_hash,
+        }
+        if proxy_dict:
+            client_kwargs['proxy'] = proxy_dict
+        if device_model:
+            client_kwargs['device_model'] = device_model
+        if app_version:
+            client_kwargs['app_version'] = app_version
+        if system_lang_code:
+            client_kwargs['system_lang_code'] = system_lang_code
         
-        proxy = get_random_proxy()
-        proxy_dict = create_proxy_dict(proxy) if proxy else None
-        
-        client = TelegramClient(session_file, api_id, api_hash, proxy=proxy_dict)
+        client = TelegramClient(session_file, **client_kwargs)
         await client.connect()
         
         if not await client.is_user_authorized():
