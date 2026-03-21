@@ -477,8 +477,32 @@ async def process_single_account(session_path, json_path, two_fa, user_id, sessi
             result["message"] = f"原session文件不存在: {session_path}"
             return result
         
+
+        orig_json_data = {}
+        if json_path and os.path.exists(json_path):
+            try:
+                with open(json_path, 'r', encoding='utf-8') as f:
+                    orig_json_data = json.load(f)
+            except Exception:
+                pass
+
+
         api_id_val = 2040
         api_hash_val = "b18441a1ff607e10a989891a5462e627"
+        if orig_json_data:
+            if 'app_id' in orig_json_data and orig_json_data['app_id']:
+                try:
+                    api_id_val = int(orig_json_data['app_id'])
+                except (ValueError, TypeError):
+                    pass
+            if 'app_hash' in orig_json_data and orig_json_data['app_hash']:
+                api_hash_val = str(orig_json_data['app_hash'])
+
+
+        device_model = orig_json_data.get('device') or None
+        app_version = orig_json_data.get('app_version') or None
+        system_lang_code = orig_json_data.get('system_lang_pack') or None
+
         
         session_copy = os.path.join(temp_dir, f"{session_name}_copy.session")
         shutil.copy2(session_path, session_copy)
@@ -486,11 +510,15 @@ async def process_single_account(session_path, json_path, two_fa, user_id, sessi
         proxy = get_random_proxy()
         proxy_dict = create_proxy_dict(proxy) if proxy else None
         
+
         client_old = TelegramClient(
             session=str(session_copy), 
             api_id=api_id_val, 
             api_hash=api_hash_val,
-            proxy=proxy_dict
+            proxy=proxy_dict,
+            device_model=device_model,
+            app_version=app_version,
+            system_lang_code=system_lang_code
         )
         await client_old.connect()
         
@@ -504,10 +532,11 @@ async def process_single_account(session_path, json_path, two_fa, user_id, sessi
         proxy_new = get_random_proxy()
         proxy_dict_new = create_proxy_dict(proxy_new) if proxy_new else None
         
+
         client_new = TelegramClient(
             session=str(new_session_path), 
-            api_id=api_id_val, 
-            api_hash=api_hash_val,
+            api_id=2040, 
+            api_hash="b18441a1ff607e10a989891a5462e627",
             proxy=proxy_dict_new
         )
         await client_new.connect()
@@ -541,14 +570,7 @@ async def process_single_account(session_path, json_path, two_fa, user_id, sessi
         await client_new.get_me()
         await client_old.log_out()
         
-        orig_json_data = {}
-        if json_path and os.path.exists(json_path):
-            try:
-                with open(json_path, 'r', encoding='utf-8') as f:
-                    orig_json_data = json.load(f)
-            except Exception:
-                pass
-        
+
         new_json_data = {
             "api_id": orig_json_data.get("api_id", api_id_val),
             "api_hash": orig_json_data.get("api_hash", api_hash_val),
