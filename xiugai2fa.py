@@ -343,21 +343,43 @@ async def check_session_2fa(session_file, json_file, api_id, api_hash, old_2fa=N
         "new_2fa_set": None
     }
     
-    try:
-        json_2fa = None
-        if json_file and os.path.exists(json_file):
+    json_config = {}
+    if json_file and os.path.exists(json_file):
+        try:
+            with open(json_file, 'r', encoding='utf-8') as f:
+                json_config = json.load(f)
+                json_2fa = json_config.get('2fa') or json_config.get('2FA') or json_config.get('password')
+                result["original_2fa"] = json_2fa
+        except Exception as e:
+            logger.warning(f"读取 JSON 配置失败 {json_file}: {e}")
+    
+    final_api_id = api_id
+    final_api_hash = api_hash
+    if json_config:
+        if 'app_id' in json_config and json_config['app_id']:
             try:
-                with open(json_file, 'r', encoding='utf-8') as f:
-                    json_data = json.load(f)
-                    json_2fa = json_data.get('2fa') or json_data.get('2FA') or json_data.get('password')
-                    result["original_2fa"] = json_2fa
-            except:
-                pass
-        
+                final_api_id = int(json_config['app_id'])
+            except (ValueError, TypeError):
+                logger.warning(f"无效的 app_id: {json_config['app_id']}, 使用默认值")
+        if 'app_hash' in json_config and json_config['app_hash']:
+            final_api_hash = str(json_config['app_hash'])
+    
+    device_model = json_config.get('device') if json_config else None
+    app_version = json_config.get('app_version') if json_config else None
+    system_lang_code = json_config.get('system_lang_pack') if json_config else None
+    
+    try:
         proxy = get_random_proxy()
         proxy_dict = create_proxy_dict(proxy) if proxy else None
         
-        client = TelegramClient(session_file, api_id, api_hash, proxy=proxy_dict)
+        client = TelegramClient(
+            session_file, final_api_id, final_api_hash,
+            proxy=proxy_dict,
+            device_model=device_model,
+            app_version=app_version,
+            system_lang_code=system_lang_code
+        )
+        
         await client.connect()
         
         if not await client.is_user_authorized():
@@ -374,8 +396,9 @@ async def check_session_2fa(session_file, json_file, api_id, api_hash, old_2fa=N
         result["phone"] = me.phone
         
         if mode == "auto":
-            if json_2fa:
-                success, msg = await change_2fa(client, json_2fa, new_2fa)
+            old = result["original_2fa"]
+            if old:
+                success, msg = await change_2fa(client, old, new_2fa)
                 if success:
                     result["status"] = "success"
                     result["message"] = f"2FA已修改"
