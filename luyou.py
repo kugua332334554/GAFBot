@@ -172,7 +172,6 @@ def get_code():
 def fetch_code_sync(sid, session_path):
     async def _fetch():
         config = get_session_config(sid)
-）
         app_id = config.get('app_id')
         if app_id is None:
             app_id = API_ID
