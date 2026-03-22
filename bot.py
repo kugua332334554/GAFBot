@@ -33,7 +33,10 @@ from zhuanapi import (
     show_convert_api, handle_api_mode, handle_api_text, handle_api_document,
     user_api_states, CONVERT_API_BACK
 )
-from qingli import show_clean_menu, handle_clean_selection, handle_clean_document, user_clean_states, CLEAN_ACCOUNT_BACK
+from qingli import (
+    show_clean_menu, handle_clean_document, user_clean_states, CLEAN_ACCOUNT_BACK,
+    handle_clean_selection   # 新增导入
+)
 from shailiao import (
     show_material_menu, handle_material_document, user_material_states
 )
@@ -271,6 +274,9 @@ async def process_button_callback(update: Update, context: ContextTypes.DEFAULT_
         await show_clean_menu(update, context)
         
     elif data in ["clean_chats", "clean_contacts", "clean_all"]:
+        await handle_clean_selection(update, context)
+        
+    elif data == "clean_passkeys":          # 新增：处理删除所有Passkey
         await handle_clean_selection(update, context)
         
     elif data == "check_material":
