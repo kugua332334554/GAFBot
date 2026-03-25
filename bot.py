@@ -35,7 +35,7 @@ from zhuanapi import (
 )
 from qingli import (
     show_clean_menu, handle_clean_document, user_clean_states, CLEAN_ACCOUNT_BACK,
-    handle_clean_selection   # 新增导入
+    handle_clean_selection
 )
 from shailiao import (
     show_material_menu, handle_material_document, user_material_states
@@ -46,6 +46,7 @@ from fangzhaohui import (
     show_prevent_recovery, handle_recovery_document, handle_recovery_2fa_input,
     handle_recovery_skip, user_recovery_states
 )
+from xiaohui import handle_destroy_document, DESTROY_BACK
 
 load_dotenv()
 TOKEN = os.getenv("BOT_TOKEN")
@@ -276,7 +277,7 @@ async def process_button_callback(update: Update, context: ContextTypes.DEFAULT_
     elif data in ["clean_chats", "clean_contacts", "clean_all"]:
         await handle_clean_selection(update, context)
         
-    elif data == "clean_passkeys":          # 新增：处理删除所有Passkey
+    elif data == "clean_passkeys":
         await handle_clean_selection(update, context)
         
     elif data == "check_material":
@@ -293,6 +294,17 @@ async def process_button_callback(update: Update, context: ContextTypes.DEFAULT_
         
     elif data == "recovery_skip_2fa":
         await handle_recovery_skip(update, context)
+
+    elif data == "destroy_session":
+        formatted_text = DESTROY_BACK.replace('\\n', '\n') if isinstance(DESTROY_BACK, str) else "🗑️ 销毁会话\n\n请上传包含 .session 和 .json 文件的 ZIP 压缩包。"
+        keyboard = [[create_back_button()]]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await query.edit_message_text(
+            text=formatted_text,
+            parse_mode=ParseMode.HTML,
+            reply_markup=reply_markup
+        )
+        user_states[user_id] = "waiting_destroy_zip"
 
 async def process_handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = str(update.effective_user.id)
@@ -373,7 +385,6 @@ async def process_handle_document(update: Update, context: ContextTypes.DEFAULT_
     all_users = load_all_users()
     user_data = all_users.get(user_id, {})
     
-    # 优先处理特殊状态
     if user_id in user_recovery_states and user_recovery_states[user_id].get("state") == "waiting_zip":
         await handle_recovery_document(update, context, user_id)
         return
@@ -400,6 +411,11 @@ async def process_handle_document(update: Update, context: ContextTypes.DEFAULT_
     
     if user_id in user_unpack_states and user_unpack_states[user_id].get("waiting_zip"):
         await handle_unpack_document(update, context, user_id)
+        return
+    
+    if user_states.get(user_id) == "waiting_destroy_zip":
+        await handle_destroy_document(update, context, user_id)
+        user_states.pop(user_id, None)
         return
     
     if user_data.get("status") != "vip":
@@ -701,7 +717,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             [btn("号码筛BAN", "check_ban", "5922712343011135025"),
              btn("筛料能力", "check_material", "5944940516754853337")],
             [btn("清理账号", "clean_account", "6007942490076745785"),
-             btn("拆包工具", "unpack_tool", "5877540355187937244")]
+             btn("拆包工具", "unpack_tool", "5877540355187937244")],
+            [btn("销毁会话", "destroy_session", "5879937509579820068")],
         ]
         
         for i in range(1, 4):
