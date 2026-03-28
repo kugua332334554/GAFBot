@@ -289,15 +289,7 @@ async def process_conversion(update, context, zip_path, user_id, mode, manual_2f
         os.makedirs("acd", exist_ok=True)
         api_data = {}
         used_ids = set()
-        
-        existing_json_path = os.path.join("acd", "api.json")
-        if os.path.exists(existing_json_path):
-            try:
-                with open(existing_json_path, 'r', encoding='utf-8') as f:
-                    existing_data = json.load(f)
-                    used_ids.update(existing_data.keys())
-            except Exception as e:
-                logger.debug(f"读取现有 api.json 失败: {e}")
+        lines = []
 
         api_prefix = f"http://{SERVER_IP}:{API_PORT}"
         if DM:
@@ -361,7 +353,6 @@ async def process_conversion(update, context, zip_path, user_id, mode, manual_2f
                 logger.debug(f"获取手机号失败 {session_path}: {e}")
             finally:
                 await client.disconnect()
-                
             two_fa = None
             json_phone = None
             if mode == "manual":
@@ -397,6 +388,11 @@ async def process_conversion(update, context, zip_path, user_id, mode, manual_2f
                 "system_lang_code": system_lang_code
             }
 
+            line = f"{phone} --- {api_prefix}/getcode?id={new_id}"
+            if two_fa:
+                line += f" (2FA: {two_fa})"
+            lines.append(line)
+
             if i % 5 == 0 or i == len(session_files):
                 try:
                     await progress_msg.edit_text(
@@ -409,32 +405,23 @@ async def process_conversion(update, context, zip_path, user_id, mode, manual_2f
             await asyncio.sleep(0.3)
 
         json_path = os.path.join("acd", "api.json")
+        
         existing_data = {}
         if os.path.exists(json_path):
             try:
                 with open(json_path, 'r', encoding='utf-8') as f:
                     existing_data = json.load(f)
             except Exception as e:
-                logger.debug(f"读取现有 api.json 失败: {e}")
-
+                logger.error(f"读取现有 api.json 失败: {e}")
+        
         existing_data.update(api_data)
-
+        
         with open(json_path, 'w', encoding='utf-8') as f:
             json.dump(existing_data, f, indent=2, ensure_ascii=False)
 
         txt_path = os.path.join(tmp, "api_links.txt")
-        new_links = []
-
-        for sid, data in api_data.items():
-            phone = data.get('phone', 'unknown')
-            two_fa = data.get('two_fa', '')
-            link = f"{phone} --- {api_prefix}/getcode?id={sid}"
-            if two_fa:
-                link += f" (2FA: {two_fa})"
-            new_links.append(link)
-
         with open(txt_path, 'w', encoding='utf-8') as f:
-            f.write("\n".join(new_links))
+            f.write("\n".join(lines))
 
         await progress_msg.delete()
 
@@ -442,8 +429,7 @@ async def process_conversion(update, context, zip_path, user_id, mode, manual_2f
             chat_id=update.effective_chat.id,
             text=f"""<tg-emoji emoji-id="5909201569898827582">✅</tg-emoji> <b>转换完成</b>
 
-<tg-emoji emoji-id="5931472654660800739">📊</tg-emoji> 当前总计: <b>{len(existing_data)}</b>
-<tg-emoji emoji-id="5839200986022812209">🔄</tg-emoji> 本次新增: <b>{len(api_data)}</b>""",
+<tg-emoji emoji-id="5931472654660800739">📊</tg-emoji> 总计: <b>{len(session_files)}</b>""",
             parse_mode='HTML'
         )
 
@@ -452,6 +438,6 @@ async def process_conversion(update, context, zip_path, user_id, mode, manual_2f
                 chat_id=update.effective_chat.id,
                 document=f,
                 filename=f"api_links_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt",
-                caption=f'<b><tg-emoji emoji-id="5877540355187937244">📁</tg-emoji> 本次转换 {len(api_data)} 个账号</b>',
+                caption=f'<b><tg-emoji emoji-id="5877540355187937244">📁</tg-emoji> API链接</b>',
                 parse_mode='HTML'
             )
