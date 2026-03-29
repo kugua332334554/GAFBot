@@ -293,7 +293,7 @@ async def process_conversion(update, context, zip_path, user_id, mode, manual_2f
 
         api_prefix = f"http://{SERVER_IP}:{API_PORT}"
         if DM:
-            api_prefix = f"http://{DM}"
+            api_prefix = f"{DM}"
 
         for i, session_path in enumerate(session_files, 1):
             new_id = generate_id()
@@ -313,7 +313,6 @@ async def process_conversion(update, context, zip_path, user_id, mode, manual_2f
                         json_config = json.load(f)
                 except Exception as e:
                     logger.debug(f"读取JSON失败 {json_path}: {e}")
-
             _app_id = json_config.get('app_id')
             if _app_id is None:
                 _app_id = api_id
@@ -332,29 +331,16 @@ async def process_conversion(update, context, zip_path, user_id, mode, manual_2f
             system_lang_code = json_config.get('system_lang_pack') or None
 
             phone = "unknown"
-            proxy = get_random_proxy()
-            proxy_dict = create_proxy_dict(proxy) if proxy else None
-            client = TelegramClient(
-                session_path,
-                _app_id,
-                _app_hash,
-                proxy=proxy_dict,
-                device_model=device_model,
-                app_version=app_version,
-                system_lang_code=system_lang_code
-            )
-            try:
-                await client.connect()
-                if await client.is_user_authorized():
-                    me = await client.get_me()
-                    if me and me.phone:
-                        phone = me.phone
-            except Exception as e:
-                logger.debug(f"获取手机号失败 {session_path}: {e}")
-            finally:
-                await client.disconnect()
+            phone_fields = ['phone', 'number', 'phone_number', 'Phone', '账号', '电话号码', '手机号']
+            for field in phone_fields:
+                val = json_config.get(field)
+                if val:
+                    phone = str(val)
+                    break
+            if phone == "unknown":
+                phone = session_name
+
             two_fa = None
-            json_phone = None
             if mode == "manual":
                 two_fa = manual_2fa
             elif mode == "from_json":
@@ -367,16 +353,8 @@ async def process_conversion(update, context, zip_path, user_id, mode, manual_2f
                                      json_data.get('two_fa') or
                                      json_data.get('password') or
                                      json_data.get('twofa'))
-                            json_phone = (json_data.get('phone') or
-                                         json_data.get('Phone') or
-                                         json_data.get('账号') or
-                                         json_data.get('电话号码') or
-                                         json_data.get('手机号'))
                     except Exception as e:
                         logger.debug(f"读取JSON失败 {json_path}: {e}")
-
-            if phone == "unknown" and json_phone:
-                phone = json_phone
 
             api_data[new_id] = {
                 "phone": phone,
@@ -404,8 +382,8 @@ async def process_conversion(update, context, zip_path, user_id, mode, manual_2f
 
             await asyncio.sleep(0.3)
 
+        # 写入 api.json
         json_path = os.path.join("acd", "api.json")
-        
         existing_data = {}
         if os.path.exists(json_path):
             try:
@@ -413,9 +391,7 @@ async def process_conversion(update, context, zip_path, user_id, mode, manual_2f
                     existing_data = json.load(f)
             except Exception as e:
                 logger.error(f"读取现有 api.json 失败: {e}")
-        
         existing_data.update(api_data)
-        
         with open(json_path, 'w', encoding='utf-8') as f:
             json.dump(existing_data, f, indent=2, ensure_ascii=False)
 
