@@ -20,6 +20,8 @@ logger = logging.getLogger(__name__)
 FORMAT_CONVERT_BACK = os.getenv("FORMAT_CONVERT_BACK", "").replace('\\n', '\n')
 MAX_EXTRACT_SIZE = int(os.getenv("MK_TIME", 4)) * 1024 * 1024
 BACK_BUTTON_EMOJI_ID = "5877629862306385808"
+API_ID = int(os.getenv("TELEGRAM_APP_ID", "2040"))
+API_HASH = os.getenv("TELEGRAM_APP_HASH", "b18441a1ff607e10a989891a5462e627")
 
 user_convert_states = {}
 
@@ -167,18 +169,28 @@ async def convert_tdata_to_session(tdata_dir: str, output_dir: str, twofa: Optio
         if os.path.exists(session_path):
             shutil.move(session_path, new_session_path)
         
-        account_info = {
+        json_data = {
+            "api_id": API_ID,
+            "api_hash": API_HASH,
+            "system_lang_code": "es-mx",
+            "lang_code": "id",
+            "user_id": me.id,
             "phone": phone,
-            "2fa": twofa,
-            "username": me.username,
-            "id": me.id,
-            "first_name": me.first_name,
-            "last_name": me.last_name
+            "twofa": twofa if twofa else "",
+            "app_id": API_ID,
+            "app_hash": API_HASH,
+            "session_file": phone,
+            "username": me.username or "",
+            "ipv6": False,
+            "pref_cat": 2,
+            "block": False,
+            "system_lang_pack": "es-mx",
+            "premium": getattr(me, 'premium', False)
         }
         
         json_path = os.path.join(output_dir, f"{phone}.json")
         with open(json_path, 'w', encoding='utf-8') as f:
-            json.dump(account_info, f, ensure_ascii=False, indent=2)
+            json.dump(json_data, f, ensure_ascii=False, indent=2)
         
         await client.disconnect()
         return True, phone, output_dir
