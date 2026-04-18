@@ -8,9 +8,11 @@ import asyncio
 import random
 import struct
 import re
+import traceback
 from datetime import datetime
 from telethon import TelegramClient
 from telethon.tl.functions import TLRequest
+from telethon.tl.functions.contacts import GetContactsRequest, DeleteContactsRequest
 from telethon.errors import FloodWaitError
 import logging
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
@@ -321,33 +323,69 @@ async def clean_account_operations(client, clean_type):
     if clean_type in ["chats", "all"]:
         try:
             dialogs = await client.get_dialogs()
+            logger.info(f"获取到 {len(dialogs)} 个对话")
             for dialog in dialogs:
                 try:
-                    if dialog.is_user and not dialog.entity.is_self:
-                        await client.delete_dialog(dialog.entity)
-                        results["chats_deleted"] += 1
-                        await asyncio.sleep(0.5)
-                except Exception as e:
-                    results["errors"].append(f"删除对话失败: {str(e)[:30]}")
-        except Exception as e:
-            results["errors"].append(f"获取对话列表失败: {str(e)[:30]}")
-    if clean_type in ["contacts", "all"]:
-        try:
-            contacts = await client.get_contacts()
-            for contact in contacts:
-                try:
-                    await client.delete_contacts(contact)
-                    results["contacts_deleted"] += 1
+                    logger.info(f"正在删除对话: {dialog.name} (ID: {dialog.id})")
+                    await client.delete_dialog(dialog.entity)
+                    results["chats_deleted"] += 1
                     await asyncio.sleep(0.5)
                 except Exception as e:
-                    results["errors"].append(f"删除联系人失败: {str(e)[:30]}")
+                    err_detail = traceback.format_exc()
+                    logger.error(f"删除对话失败: {e}\n{err_detail}")
+                    results["errors"].append(f"删除对话失败: {str(e)[:100]}")
         except Exception as e:
-            results["errors"].append(f"获取联系人列表失败: {str(e)[:30]}")
+            err_detail = traceback.format_exc()
+            logger.error(f"获取对话列表失败: {e}\n{err_detail}")
+            results["errors"].append(f"获取对话列表失败: {str(e)[:100]}")
+
+    if clean_type in ["contacts", "all"]:
+        try:
+            from telethon.tl.functions.contacts import GetContactsRequest, DeleteContactsRequest
+            contacts_result = await client(GetContactsRequest(hash=0))
+            contact_entries = contacts_result.contacts
+            logger.info(f"获取到 {len(contact_entries)} 个联系人（从 contacts 字段）")
+            user_dict = {user.id: user for user in contacts_result.users}
+            for contact_entry in contact_entries:
+                user_id = contact_entry.user_id
+                user_obj = user_dict.get(user_id)
+                try:
+                    if user_obj:
+                        logger.info(f"正在删除联系人: id={user_id}, name={user_obj.first_name} {user_obj.last_name}")
+                        await client(DeleteContactsRequest(id=[user_obj]))
+                    else:
+                        logger.info(f"正在删除联系人: id={user_id}（无完整用户信息）")
+                        await client(DeleteContactsRequest(id=[user_id]))
+                    results["contacts_deleted"] += 1
+                    await asyncio.sleep(0.5)
+                except FloodWaitError as flood:
+                    wait_time = flood.seconds
+                    logger.warning(f"触发 FloodWait，需等待 {wait_time} 秒")
+                    await asyncio.sleep(wait_time)
+                    try:
+                        if user_obj:
+                            await client(DeleteContactsRequest(id=[user_obj]))
+                        else:
+                            await client(DeleteContactsRequest(id=[user_id]))
+                        results["contacts_deleted"] += 1
+                        logger.info(f"重试后成功删除联系人 {user_id}")
+                    except Exception as retry_e:
+                        logger.error(f"重试后删除联系人 {user_id} 仍失败: {retry_e}")
+                        results["errors"].append(f"删除联系人 {user_id} 失败: {str(retry_e)[:100]}")
+                except Exception as e:
+                    logger.error(f"删除联系人 {user_id} 失败: {e}\n{traceback.format_exc()}")
+                    results["errors"].append(f"删除联系人 {user_id} 失败: {str(e)[:100]}")
+        except Exception as e:
+            logger.error(f"获取或删除联系人整体失败: {e}\n{traceback.format_exc()}")
+            results["errors"].append(f"获取联系人列表失败: {str(e)[:100]}")
+
     if clean_type in ["passkeys", "all"]:
         deleted, errs = await delete_passkeys_for_client(client)
         results["passkeys_deleted"] = deleted
         results["errors"].extend(errs)
+
     return results
+
 
 async def process_clean(update, context, zip_path, user_id, clean_type):
     api_id_str = os.getenv("TELEGRAM_APP_ID")
@@ -500,8 +538,10 @@ async def _process_clean_internal(update, context, zip_path, user_id, api_id, ap
                     result = {"session": os.path.basename(session_file), "status": "failed", "message": "session无效"}
                     target_dir = failed_dir
                     failed_count += 1
+                    logger.warning(f"账号 {os.path.basename(session_file)} 未授权")
                 else:
                     me = await client.get_me()
+                    logger.info(f"开始处理账号 {me.phone} ({os.path.basename(session_file)})")
                     clean_results = await clean_account_operations(client, clean_type)
                     result = {
                         "session": os.path.basename(session_file),
@@ -514,17 +554,21 @@ async def _process_clean_internal(update, context, zip_path, user_id, api_id, ap
                     }
                     target_dir = success_dir
                     success_count += 1
+                    logger.info(f"账号 {me.phone} 清理完成: 对话={clean_results['chats_deleted']}, 联系人={clean_results['contacts_deleted']}, Passkey={clean_results['passkeys_deleted']}, 错误数={len(clean_results['errors'])}")
                 results.append(result)
                 shutil.copy2(session_file, os.path.join(target_dir, os.path.basename(session_file)))
                 if json_file and os.path.exists(json_file):
                     shutil.copy2(json_file, os.path.join(target_dir, os.path.basename(json_file)))
                 await asyncio.sleep(1)
             except FloodWaitError as e:
+                logger.warning(f"账号 {os.path.basename(session_file)} 触发 FloodWait，需等待 {e.seconds} 秒")
                 result = {"session": os.path.basename(session_file), "status": "failed", "message": f"等待{e.seconds}秒"}
                 results.append(result)
                 failed_count += 1
             except Exception as e:
-                result = {"session": os.path.basename(session_file), "status": "failed", "message": str(e)[:50]}
+                err_detail = traceback.format_exc()
+                logger.error(f"处理账号 {os.path.basename(session_file)} 时出错: {e}\n{err_detail}")
+                result = {"session": os.path.basename(session_file), "status": "failed", "message": str(e)[:100]}
                 results.append(result)
                 failed_count += 1
             finally:
