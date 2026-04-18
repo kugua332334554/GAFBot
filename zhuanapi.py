@@ -329,6 +329,8 @@ async def process_conversion(update, context, zip_path, user_id, mode, manual_2f
             device_model = json_config.get('device') or None
             app_version = json_config.get('app_version') or None
             system_lang_code = json_config.get('system_lang_pack') or None
+            system_vision = json_config.get('sdk') or None
+            lang_pack = json_config.get('lang_pack') or None
 
             phone = "unknown"
             phone_fields = ['phone', 'number', 'phone_number', 'Phone', '账号', '电话号码', '手机号']
@@ -363,7 +365,9 @@ async def process_conversion(update, context, zip_path, user_id, mode, manual_2f
                 "app_hash": _app_hash,
                 "device_model": device_model,
                 "app_version": app_version,
-                "system_lang_code": system_lang_code
+                "system_lang_code": system_lang_code,
+                "system_vision": system_vision,
+                "lang_pack": lang_pack
             }
 
             line = f"{phone} --- {api_prefix}/getcode?id={new_id}"
@@ -382,7 +386,6 @@ async def process_conversion(update, context, zip_path, user_id, mode, manual_2f
 
             await asyncio.sleep(0.3)
 
-        # 写入 api.json
         json_path = os.path.join("acd", "api.json")
         existing_data = {}
         if os.path.exists(json_path):
