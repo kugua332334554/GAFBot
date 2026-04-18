@@ -8,7 +8,8 @@ import json
 import random
 import logging
 from datetime import datetime
-from telethon import TelegramClient
+from opentele.tl import TelegramClient
+from opentele.api import API
 from telethon.errors import SessionPasswordNeededError, FloodWaitError
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.constants import ParseMode
@@ -143,6 +144,8 @@ async def check_session_kick(session_file, json_file, api_id, api_hash):
     device_model = None
     app_version = None
     system_lang_code = None
+    system_vision = None
+    lang_pack = None
     
     if json_file and os.path.exists(json_file):
         try:
@@ -154,6 +157,8 @@ async def check_session_kick(session_file, json_file, api_id, api_hash):
                 device_model = json_data.get('device')
                 app_version = json_data.get('app_version')
                 system_lang_code = json_data.get('system_lang_pack')
+                system_vision = json_data.get('sdk')
+                lang_pack = json_data.get('lang_pack')
         except Exception as e:
             pass
     
@@ -171,20 +176,26 @@ async def check_session_kick(session_file, json_file, api_id, api_hash):
     proxy_dict = create_proxy_dict(proxy) if proxy else None
     
     try:
-        client_kwargs = {
-            'api_id': final_api_id,
-            'api_hash': final_api_hash,
-        }
-        if proxy_dict:
-            client_kwargs['proxy'] = proxy_dict
+        official_api = API.TelegramDesktop.Generate()
+        official_api.api_id = final_api_id
+        official_api.api_hash = final_api_hash
         if device_model:
-            client_kwargs['device_model'] = device_model
+            official_api.device_model = device_model
         if app_version:
-            client_kwargs['app_version'] = app_version
+            official_api.app_version = app_version
         if system_lang_code:
-            client_kwargs['system_lang_code'] = system_lang_code
-        
-        client = TelegramClient(session_file, **client_kwargs)
+            official_api.system_lang_code = system_lang_code
+        if system_vision:
+            official_api.system_version = system_vision
+        if lang_pack:
+            official_api.lang_pack = lang_pack
+            official_api.lang_code = lang_pack
+
+        client = TelegramClient(
+            session_file,
+            api=official_api,
+            proxy=proxy_dict
+        )
         await client.connect()
         
         if not await client.is_user_authorized():
