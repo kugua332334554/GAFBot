@@ -5,7 +5,8 @@ import asyncio
 import logging
 import random
 import time
-from telethon import TelegramClient
+from opentele.tl import TelegramClient
+from opentele.api import API
 from telethon.errors import SessionPasswordNeededError, AuthRestartError
 from dotenv import load_dotenv
 
@@ -107,24 +108,21 @@ class LoginHandler:
         self.phone = phone
         self.session_file = f"sessions/{phone}.session"
         os.makedirs("sessions", exist_ok=True)
-        my_id_val = int(os.getenv("TELEGRAM_API_ID", 2040))
-        my_hash_val = str(os.getenv("TELEGRAM_APP_HASH", "b18441a1ff607e10a989891a5462e627")).strip()
         
         self.proxy = get_random_proxy()
         proxy_dict = create_proxy_dict(self.proxy) if self.proxy else None
         
+        official_api = API.TelegramDesktop.Generate()
+        
         self.client = TelegramClient(
-            self.session_file, 
-            api_id=my_id_val, 
-            api_hash=my_hash_val,
+            self.session_file,
+            api=official_api,
             proxy=proxy_dict
         )
         
         await self.client.connect()
         
         try:
-            logger.info(f"Client API HASH internal type: {type(self.client.api_hash)}")
-            
             if not await self.client.is_user_authorized():
                 await self.client.send_code_request(phone)
                 await update.message.reply_text(
