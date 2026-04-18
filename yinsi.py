@@ -7,7 +7,8 @@ import time
 import json
 import random
 from datetime import datetime
-from telethon import TelegramClient
+from opentele.tl import TelegramClient
+from opentele.api import API
 from telethon.errors import SessionPasswordNeededError, FloodWaitError
 from telethon.tl.functions.account import SetPrivacyRequest
 from telethon.tl.types import InputPrivacyKeyStatusTimestamp, InputPrivacyKeyPhoneNumber, InputPrivacyValueAllowAll, InputPrivacyValueDisallowAll, InputPrivacyValueAllowContacts, InputPrivacyValueDisallowContacts, InputPrivacyKeyChatInvite, InputPrivacyKeyProfilePhoto
@@ -411,22 +412,36 @@ async def check_session_privacy(session_file, json_file, api_id, api_hash, priva
                 logger.warning(f"无效的 app_id: {json_config['app_id']}, 使用默认值")
         if 'app_hash' in json_config and json_config['app_hash']:
             final_api_hash = str(json_config['app_hash'])
+    
     device_model = json_config.get('device') or None
     app_version = json_config.get('app_version') or None
     system_lang_code = json_config.get('system_lang_pack') or None
+    system_vision = json_config.get('sdk') or None
+    lang_pack = json_config.get('lang_pack') or None
     
     proxy = get_random_proxy()
     proxy_dict = create_proxy_dict(proxy) if proxy else None
     
     try:
+        official_api = API.TelegramDesktop.Generate()
+        official_api.api_id = final_api_id
+        official_api.api_hash = final_api_hash
+        if device_model:
+            official_api.device_model = device_model
+        if app_version:
+            official_api.app_version = app_version
+        if system_lang_code:
+            official_api.system_lang_code = system_lang_code
+        if system_vision:
+            official_api.system_version = system_vision
+        if lang_pack:
+            official_api.lang_pack = lang_pack
+            official_api.lang_code = lang_pack
+
         client = TelegramClient(
             session_file,
-            final_api_id,
-            final_api_hash,
-            proxy=proxy_dict,
-            device_model=device_model,
-            app_version=app_version,
-            system_lang_code=system_lang_code
+            api=official_api,
+            proxy=proxy_dict
         )
         await client.connect()
         
