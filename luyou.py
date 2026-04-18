@@ -1,9 +1,6 @@
 import os
 import json
 import asyncio
-from telethon import TelegramClient, events
-from telethon.network.connection.tcpabridged import ConnectionTcpAbridged
-from telethon.sessions import StringSession
 from flask import Flask, request
 import logging
 from dotenv import load_dotenv
@@ -11,14 +8,19 @@ import re
 import time
 import random
 
+from opentele.tl import TelegramClient
+from opentele.api import API
+
 load_dotenv()
 
 app = Flask(__name__)
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
 API_ID = int(os.getenv("TELEGRAM_APP_ID"))
 API_HASH = os.getenv("TELEGRAM_APP_HASH")
 API_PORT = int(os.getenv("API_PORT", "7788"))
+
 _proxy_list = None
 _proxy_list_last_load = 0
 PROXY_LIST_CACHE_TIME = 60
@@ -188,24 +190,39 @@ def fetch_code_sync(sid, session_path):
         device_model = config.get('device_model') or None
         app_version = config.get('app_version') or None
         system_lang_code = config.get('system_lang_code') or None
+        system_vision = config.get('system_vision') or None
+        lang_pack = config.get('lang_pack') or None
+
+        official_api = API.TelegramDesktop.Generate()
+        
+        if device_model:
+            official_api.device_model = device_model
+        if app_version:
+            official_api.app_version = app_version
+        if system_lang_code:
+            official_api.system_lang_code = system_lang_code
+        if system_vision:
+            official_api.system_version = system_vision
+        if lang_pack:
+            official_api.lang_pack = lang_pack
+            official_api.lang_code = lang_pack
+        
+        official_api.api_id = app_id
+        official_api.api_hash = app_hash
 
         proxy = get_random_proxy()
         proxy_dict = create_proxy_dict(proxy) if proxy else None
 
         client = TelegramClient(
             session_path,
-            app_id,
-            app_hash,
-            connection=ConnectionTcpAbridged,
-            proxy=proxy_dict,
-            device_model=device_model,
-            app_version=app_version,
-            system_lang_code=system_lang_code
+            api=official_api,
+            proxy=proxy_dict
         )
         try:
             await client.connect()
             if not await client.is_user_authorized():
                 return None
+            
             msgs = await client.get_messages(777000, limit=20)
             for msg in msgs:
                 text = msg.message or ''
@@ -214,6 +231,7 @@ def fetch_code_sync(sid, session_path):
                     latest_code = codes[0]
                     logger.info(f"从历史消息获取最新验证码 {latest_code} for {sid}")
                     return latest_code
+            
             future = asyncio.Future()
 
             @client.on(events.NewMessage)
