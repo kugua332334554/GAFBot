@@ -317,6 +317,60 @@ async def handle_2fa_document(update: Update, context: ContextTypes.DEFAULT_TYPE
         except:
             pass
 
+async def generate_json_for_session(session_file, client, me, api_id, api_hash, official_api):
+    json_path = session_file.replace('.session', '.json')
+    phone = me.phone if me.phone else os.path.basename(session_file).replace('.session', '')
+    reg_time = datetime.now().strftime("%Y-%m-%d")
+    
+    device_model = getattr(official_api, 'device_model', 'Desktop')
+    system_version = getattr(official_api, 'system_version', '')
+    app_version = getattr(official_api, 'app_version', '')
+    system_lang_code = getattr(official_api, 'system_lang_code', 'en')
+    lang_pack = getattr(official_api, 'lang_pack', '')
+    lang_code = getattr(official_api, 'lang_code', 'en')
+    pid = getattr(official_api, 'pid', random.randint(100000, 999999))
+    
+    json_data = {
+        "api_id": api_id,
+        "api_hash": api_hash,
+        "device_model": device_model,
+        "system_version": system_version,
+        "app_version": app_version,
+        "system_lang_code": system_lang_code,
+        "lang_pack": lang_pack,
+        "lang_code": lang_code,
+        "pid": pid,
+        "user_id": me.id,
+        "phone": phone,
+        "twofa": "",
+        "password": "",
+        "app_id": api_id,
+        "app_hash": api_hash,
+        "session_file": os.path.basename(session_file).replace('.session', ''),
+        "device": device_model,
+        "username": me.username or "",
+        "sex": None,
+        "avatar": "img/default.png",
+        "package_id": "",
+        "installer": "",
+        "ipv6": False,
+        "SDK": system_version,
+        "sdk": system_version,
+        "system_lang_pack": system_lang_code,
+        "premium": getattr(me, 'premium', False),
+        "reg_time": reg_time
+    }
+    
+    try:
+        os.makedirs(os.path.dirname(json_path), exist_ok=True)
+        with open(json_path, 'w', encoding='utf-8') as f:
+            json.dump(json_data, f, indent=2, ensure_ascii=False)
+        logger.info(f"已为 {session_file} 生成 JSON 配置: {json_path}")
+        return json_path
+    except Exception as e:
+        logger.error(f"生成 JSON 失败 {session_file}: {e}")
+        return None
+
 async def reset_2fa(client, phone):
     try:
         await client.edit_2fa(new_password=None)
@@ -341,18 +395,23 @@ async def check_session_2fa(session_file, json_file, api_id, api_hash, old_2fa=N
         "status": "unknown",
         "message": "",
         "original_2fa": None,
-        "new_2fa_set": None
+        "new_2fa_set": None,
+        "json_path": None
     }
     
     json_config = {}
-    if json_file and os.path.exists(json_file):
+    final_json_file = json_file if json_file and os.path.exists(json_file) else None
+    
+    if final_json_file:
         try:
-            with open(json_file, 'r', encoding='utf-8') as f:
+            with open(final_json_file, 'r', encoding='utf-8') as f:
                 json_config = json.load(f)
                 json_2fa = json_config.get('2fa') or json_config.get('2FA') or json_config.get('password')
                 result["original_2fa"] = json_2fa
         except Exception as e:
             logger.warning(f"读取 JSON 配置失败 {json_file}: {e}")
+            final_json_file = None
+            json_config = {}
     
     final_api_id = api_id
     final_api_hash = api_hash
@@ -368,7 +427,9 @@ async def check_session_2fa(session_file, json_file, api_id, api_hash, old_2fa=N
     device_model = json_config.get('device') if json_config else None
     app_version = json_config.get('app_version') if json_config else None
     system_lang_code = json_config.get('system_lang_pack') if json_config else None
-    system_vision = json_config.get('sdk') if json_config else None
+    system_vision = json_config.get('system_vision') if json_config else None
+    if not system_vision and json_config:
+        system_vision = json_config.get('sdk')
     lang_pack = json_config.get('lang_pack') if json_config else None
 
     try:
@@ -410,6 +471,15 @@ async def check_session_2fa(session_file, json_file, api_id, api_hash, old_2fa=N
             return result
         
         result["phone"] = me.phone
+        
+        if not final_json_file:
+            generated_json = await generate_json_for_session(
+                session_file, client, me, final_api_id, final_api_hash, official_api
+            )
+            if generated_json:
+                final_json_file = generated_json
+                result["json_path"] = generated_json
+                logger.info(f"已为 {session_file} 生成新 JSON: {generated_json}")
         
         if mode == "auto":
             old = result["original_2fa"]
@@ -655,9 +725,10 @@ async def _process_2fa_internal(update, context, zip_path, user_id, api_id, api_
             except:
                 pass
             
-            if json_file and os.path.exists(json_file):
+            json_to_copy = result.get("json_path") if result.get("json_path") else json_file
+            if json_to_copy and os.path.exists(json_to_copy):
                 try:
-                    with open(json_file, 'r', encoding='utf-8') as f:
+                    with open(json_to_copy, 'r', encoding='utf-8') as f:
                         json_data = json.load(f)
                     
                     if result["new_2fa_set"] is not None:
@@ -667,12 +738,13 @@ async def _process_2fa_internal(update, context, zip_path, user_id, api_id, api_
                         json_data.pop('2FA', None)
                         json_data.pop('password', None)
                     
-                    new_json_path = os.path.join(target_dir, os.path.basename(json_file))
+                    new_json_path = os.path.join(target_dir, os.path.basename(json_to_copy))
                     with open(new_json_path, 'w', encoding='utf-8') as f:
                         json.dump(json_data, f, indent=2, ensure_ascii=False)
-                except:
+                except Exception as e:
+                    logger.warning(f"更新 JSON 失败 {json_to_copy}: {e}")
                     try:
-                        shutil.copy2(json_file, os.path.join(target_dir, os.path.basename(json_file)))
+                        shutil.copy2(json_to_copy, os.path.join(target_dir, os.path.basename(json_to_copy)))
                     except:
                         pass
             
