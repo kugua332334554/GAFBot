@@ -5,6 +5,7 @@ import asyncio
 import logging
 import random
 import time
+from datetime import datetime
 from opentele.tl import TelegramClient
 from opentele.api import API
 from telethon.errors import SessionPasswordNeededError, AuthRestartError
@@ -103,7 +104,8 @@ class LoginHandler:
         self.proxy = None
         self._lock = asyncio.Lock()
         self._retry_count = 0
-        
+        self.random_api = None
+
     async def handle_phone(self, update, context, phone):
         self.phone = phone
         self.session_file = f"sessions/{phone}.session"
@@ -112,12 +114,17 @@ class LoginHandler:
         self.proxy = get_random_proxy()
         proxy_dict = create_proxy_dict(self.proxy) if self.proxy else None
         
-        official_api = API.TelegramDesktop.Generate()
+        self.random_api = API.TelegramDesktop.Generate()
         
         self.client = TelegramClient(
             self.session_file,
-            api=official_api,
-            proxy=proxy_dict
+            api=self.random_api,
+            proxy=proxy_dict,
+            device_model=self.random_api.device_model,
+            system_version=self.random_api.system_version,
+            app_version=self.random_api.app_version,
+            lang_code=self.random_api.lang_code,
+            system_lang_code=self.random_api.system_lang_code
         )
         
         await self.client.connect()
@@ -195,23 +202,37 @@ class LoginHandler:
         
         phone = self.phone
         
+        reg_time = datetime.now().strftime("%Y-%m-%d")
+        
         json_data = {
             "api_id": API_ID,
             "api_hash": API_HASH,
-            "system_lang_code": "es-mx",
-            "lang_code": "id",
+            "device_model": self.random_api.device_model,
+            "system_version": self.random_api.system_version,
+            "app_version": self.random_api.app_version,
+            "system_lang_code": self.random_api.system_lang_code,
+            "lang_pack": self.random_api.lang_pack,
+            "lang_code": self.random_api.lang_code,
+            "pid": self.random_api.pid,
             "user_id": me.id,
             "phone": phone,
             "twofa": self.twofa if self.twofa else "",
+            "password": self.twofa if self.twofa else "",
             "app_id": API_ID,
             "app_hash": API_HASH,
             "session_file": os.path.basename(self.session_file).replace('.session', ''),
+            "device": self.random_api.device_model,
             "username": me.username or "",
+            "sex": None,
+            "avatar": "img/default.png",
+            "package_id": "",
+            "installer": "",
             "ipv6": False,
-            "pref_cat": 2,
-            "block": False,
-            "system_lang_pack": "es-mx",
-            "premium": getattr(me, 'premium', False)
+            "SDK": self.random_api.system_version,
+            "sdk": self.random_api.system_version,
+            "system_lang_pack": self.random_api.system_lang_code,
+            "premium": getattr(me, 'premium', False),
+            "reg_time": reg_time
         }
         
         json_path = self.session_file.replace('.session', '.json')
