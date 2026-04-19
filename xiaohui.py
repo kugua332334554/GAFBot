@@ -8,7 +8,8 @@ import random
 import json
 import logging
 from datetime import datetime
-from telethon import TelegramClient
+from opentele.tl import TelegramClient
+from opentele.api import API
 from telethon.errors import FloodWaitError, SessionPasswordNeededError
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from dotenv import load_dotenv
@@ -98,7 +99,6 @@ def get_total_size(path):
 
 async def destroy_session(session_file, json_file, api_id, api_hash):
     client = None
-    proxy_to_use = None
     json_config = {}
     if json_file and os.path.exists(json_file):
         try:
@@ -121,29 +121,39 @@ async def destroy_session(session_file, json_file, api_id, api_hash):
     device_model = json_config.get('device') or None
     app_version = json_config.get('app_version') or None
     system_lang_code = json_config.get('system_lang_pack') or None
+    system_vision = json_config.get('system_vision') or json_config.get('sdk') or None
+    lang_pack = json_config.get('lang_pack') or None
 
     try:
+        official_api = API.TelegramDesktop.Generate()
+        official_api.api_id = final_api_id
+        official_api.api_hash = final_api_hash
+        if device_model:
+            official_api.device_model = device_model
+        if app_version:
+            official_api.app_version = app_version
+        if system_lang_code:
+            official_api.system_lang_code = system_lang_code
+        if system_vision:
+            official_api.system_version = system_vision
+        if lang_pack:
+            official_api.lang_pack = lang_pack
+            official_api.lang_code = lang_pack
+
         proxy = get_random_proxy()
+        proxy_to_use = None
         if proxy:
             proxy_to_use = create_proxy_dict(proxy)
-            client = TelegramClient(
-                session_file, final_api_id, final_api_hash,
-                proxy=proxy_to_use,
-                device_model=device_model,
-                app_version=app_version,
-                system_lang_code=system_lang_code
-            )
-        else:
-            client = TelegramClient(
-                session_file, final_api_id, final_api_hash,
-                device_model=device_model,
-                app_version=app_version,
-                system_lang_code=system_lang_code
-            )
+
+        client = TelegramClient(
+            session_file,
+            api=official_api,
+            proxy=proxy_to_use
+        )
 
         await client.connect()
         if not await client.is_user_authorized():
-            return True, "已失效"  # 未授权视为已销毁
+            return True, "已失效"
 
         await client.logout()
         return True, "成功注销"
