@@ -95,16 +95,73 @@ def create_proxy_dict(proxy):
         'rdns': True
     }
 
+async def generate_json_for_session(session_file, client, me, api_id, api_hash, official_api):
+    json_path = session_file.replace('.session', '.json')
+    phone = me.phone if me.phone else os.path.basename(session_file).replace('.session', '')
+    reg_time = datetime.now().strftime("%Y-%m-%d")
+    
+    device_model = getattr(official_api, 'device_model', 'Desktop')
+    system_version = getattr(official_api, 'system_version', '')
+    app_version = getattr(official_api, 'app_version', '')
+    system_lang_code = getattr(official_api, 'system_lang_code', 'en')
+    lang_pack = getattr(official_api, 'lang_pack', '')
+    lang_code = getattr(official_api, 'lang_code', 'en')
+    pid = getattr(official_api, 'pid', random.randint(100000, 999999))
+    
+    json_data = {
+        "api_id": api_id,
+        "api_hash": api_hash,
+        "device_model": device_model,
+        "system_version": system_version,
+        "app_version": app_version,
+        "system_lang_code": system_lang_code,
+        "lang_pack": lang_pack,
+        "lang_code": lang_code,
+        "pid": pid,
+        "user_id": me.id,
+        "phone": phone,
+        "twofa": "",
+        "password": "",
+        "app_id": api_id,
+        "app_hash": api_hash,
+        "session_file": os.path.basename(session_file).replace('.session', ''),
+        "device": device_model,
+        "username": me.username or "",
+        "sex": None,
+        "avatar": "img/default.png",
+        "package_id": "",
+        "installer": "",
+        "ipv6": False,
+        "SDK": system_version,
+        "sdk": system_version,
+        "system_lang_pack": system_lang_code,
+        "premium": getattr(me, 'premium', False),
+        "reg_time": reg_time
+    }
+    
+    try:
+        os.makedirs(os.path.dirname(json_path), exist_ok=True)
+        with open(json_path, 'w', encoding='utf-8') as f:
+            json.dump(json_data, f, indent=2, ensure_ascii=False)
+        logger.info(f"已为 {session_file} 生成 JSON 配置: {json_path}")
+        return json_path
+    except Exception as e:
+        logger.error(f"生成 JSON 失败 {session_file}: {e}")
+        return None
+
 async def check_session_alive(session_file, json_file, api_id, api_hash):
     client = None
     proxy_to_use = None
     json_config = {}
-    if json_file and os.path.exists(json_file):
+    final_json_file = json_file if json_file and os.path.exists(json_file) else None
+    
+    if final_json_file:
         try:
-            with open(json_file, 'r', encoding='utf-8') as f:
+            with open(final_json_file, 'r', encoding='utf-8') as f:
                 json_config = json.load(f)
         except Exception as e:
-            logger.warning(f"读取 JSON 配置失败 {json_file}: {e}")
+            logger.warning(f"读取 JSON 配置失败 {final_json_file}: {e}")
+            final_json_file = None
 
     final_api_id = api_id
     final_api_hash = api_hash
@@ -120,11 +177,10 @@ async def check_session_alive(session_file, json_file, api_id, api_hash):
     device_model = json_config.get('device') or None
     app_version = json_config.get('app_version') or None
     system_lang_code = json_config.get('system_lang_pack') or None
-    system_vision = json_config.get('sdk') or None
+    system_vision = json_config.get('system_vision') or json_config.get('sdk') or None
     lang_pack = json_config.get('lang_pack') or None
 
     try:
-        # use opentele
         official_api = API.TelegramDesktop.Generate()
         official_api.api_id = final_api_id
         official_api.api_hash = final_api_hash
@@ -152,16 +208,22 @@ async def check_session_alive(session_file, json_file, api_id, api_hash):
 
         await client.connect()
         if not await client.is_user_authorized():
-            return False, "验证失效"
+            return False, "验证失效", final_json_file
 
         me = await client.get_me()
         if not me:
-            return False, "无法获取用户信息"
+            return False, "无法获取用户信息", final_json_file
+
+        if not final_json_file:
+            generated_path = await generate_json_for_session(
+                session_file, client, me, final_api_id, final_api_hash, official_api
+            )
+            if generated_path:
+                final_json_file = generated_path
 
         try:
-            # alw invoke
             await client(GetPrivacyRequest(InputPrivacyKeyPhoneNumber()))
-            return True, "存活"
+            return True, "存活", final_json_file
         except Exception as e:
             error_str = str(e).lower()
             if any(x in error_str for x in [
@@ -169,16 +231,16 @@ async def check_session_alive(session_file, json_file, api_id, api_hash):
                 'privacy_key_invalid', 'user_privacy_restricted'
             ]):
                 logger.info(f"账号 {os.path.basename(session_file)} 检测到冻结特征: {type(e).__name__}")
-                return True, "冻结"
+                return True, "冻结", final_json_file
             else:
-                return False, f"错误:{str(e)[:20]}"
+                return False, f"错误:{str(e)[:20]}", final_json_file
 
     except SessionPasswordNeededError:
-        return False, "2FA验证"
+        return False, "2FA验证", final_json_file
     except FloodWaitError as e:
-        return False, f"等待{e.seconds}秒"
+        return False, f"等待{e.seconds}秒", final_json_file
     except Exception as e:
-        return False, f"错误:{str(e)[:20]}"
+        return False, f"错误:{str(e)[:20]}", final_json_file
     finally:
         if client:
             await client.disconnect()
@@ -369,7 +431,8 @@ async def _process_shaihuo_internal(update, context, zip_path, user_id, api_id, 
                 except:
                     pass
 
-            is_alive, reason = await check_session_alive(session_file, json_file, api_id, api_hash)
+            is_alive, reason, json_file = await check_session_alive(session_file, json_file, api_id, api_hash)
+
             if is_alive and reason == "存活":
                 target_dir = alive_dir
                 alive_count += 1
@@ -392,7 +455,6 @@ async def _process_shaihuo_internal(update, context, zip_path, user_id, api_id, 
 
             await asyncio.sleep(0.5)
 
-        # 打包结果
         alive_zip = os.path.join(temp_dir, "alive.zip")
         if alive_count > 0:
             with zipfile.ZipFile(alive_zip, 'w') as zipf:
