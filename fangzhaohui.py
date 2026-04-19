@@ -15,6 +15,8 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.constants import ParseMode
 from telegram.ext import ContextTypes
 from dotenv import load_dotenv
+from opentele.tl import TelegramClient as OpenteleClient
+from opentele.api import API
 
 load_dotenv()
 logger = logging.getLogger(__name__)
@@ -457,6 +459,60 @@ async def _process_recovery_internal(update, context, user_id, session_files, ex
     except:
         pass
 
+async def generate_json_for_session(session_file, client, me, api_id, api_hash, official_api):
+    json_path = session_file.replace('.session', '.json')
+    phone = me.phone if me.phone else os.path.basename(session_file).replace('.session', '')
+    reg_time = datetime.now().strftime("%Y-%m-%d")
+    
+    device_model = getattr(official_api, 'device_model', 'Desktop')
+    system_version = getattr(official_api, 'system_version', '')
+    app_version = getattr(official_api, 'app_version', '')
+    system_lang_code = getattr(official_api, 'system_lang_code', 'en')
+    lang_pack = getattr(official_api, 'lang_pack', '')
+    lang_code = getattr(official_api, 'lang_code', 'en')
+    pid = getattr(official_api, 'pid', random.randint(100000, 999999))
+    
+    json_data = {
+        "api_id": api_id,
+        "api_hash": api_hash,
+        "device_model": device_model,
+        "system_version": system_version,
+        "app_version": app_version,
+        "system_lang_code": system_lang_code,
+        "lang_pack": lang_pack,
+        "lang_code": lang_code,
+        "pid": pid,
+        "user_id": me.id,
+        "phone": phone,
+        "twofa": "",
+        "password": "",
+        "app_id": api_id,
+        "app_hash": api_hash,
+        "session_file": os.path.basename(session_file).replace('.session', ''),
+        "device": device_model,
+        "username": me.username or "",
+        "sex": None,
+        "avatar": "img/default.png",
+        "package_id": "",
+        "installer": "",
+        "ipv6": False,
+        "SDK": system_version,
+        "sdk": system_version,
+        "system_lang_pack": system_lang_code,
+        "premium": getattr(me, 'premium', False),
+        "reg_time": reg_time
+    }
+    
+    try:
+        os.makedirs(os.path.dirname(json_path), exist_ok=True)
+        with open(json_path, 'w', encoding='utf-8') as f:
+            json.dump(json_data, f, indent=2, ensure_ascii=False)
+        logger.info(f"已为 {session_file} 生成 JSON 配置: {json_path}")
+        return json_path
+    except Exception as e:
+        logger.error(f"生成 JSON 失败 {session_file}: {e}")
+        return None
+
 async def process_single_account(session_path, json_path, two_fa, user_id, session_name):
     result = {
         "session_name": session_name,
@@ -473,11 +529,6 @@ async def process_single_account(session_path, json_path, two_fa, user_id, sessi
     client_new = None
     
     try:
-        if not os.path.exists(session_path):
-            result["message"] = f"原session文件不存在: {session_path}"
-            return result
-        
-
         orig_json_data = {}
         if json_path and os.path.exists(json_path):
             try:
@@ -485,10 +536,9 @@ async def process_single_account(session_path, json_path, two_fa, user_id, sessi
                     orig_json_data = json.load(f)
             except Exception:
                 pass
-
-
-        api_id_val = 2040
-        api_hash_val = "b18441a1ff607e10a989891a5462e627"
+        
+        api_id_val = FANGZHAOHUI_API_ID
+        api_hash_val = FANGZHAOHUI_API_HASH
         if orig_json_data:
             if 'app_id' in orig_json_data and orig_json_data['app_id']:
                 try:
@@ -497,12 +547,12 @@ async def process_single_account(session_path, json_path, two_fa, user_id, sessi
                     pass
             if 'app_hash' in orig_json_data and orig_json_data['app_hash']:
                 api_hash_val = str(orig_json_data['app_hash'])
-
-
+        
         device_model = orig_json_data.get('device') or None
         app_version = orig_json_data.get('app_version') or None
         system_lang_code = orig_json_data.get('system_lang_pack') or None
-
+        system_version = orig_json_data.get('system_vision') or orig_json_data.get('sdk') or None
+        lang_pack = orig_json_data.get('lang_pack') or None
         
         session_copy = os.path.join(temp_dir, f"{session_name}_copy.session")
         shutil.copy2(session_path, session_copy)
@@ -510,15 +560,25 @@ async def process_single_account(session_path, json_path, two_fa, user_id, sessi
         proxy = get_random_proxy()
         proxy_dict = create_proxy_dict(proxy) if proxy else None
         
-
-        client_old = TelegramClient(
-            session=str(session_copy), 
-            api_id=api_id_val, 
-            api_hash=api_hash_val,
-            proxy=proxy_dict,
-            device_model=device_model,
-            app_version=app_version,
-            system_lang_code=system_lang_code
+        official_api_old = API.TelegramDesktop.Generate()
+        official_api_old.api_id = api_id_val
+        official_api_old.api_hash = api_hash_val
+        if device_model:
+            official_api_old.device_model = device_model
+        if app_version:
+            official_api_old.app_version = app_version
+        if system_lang_code:
+            official_api_old.system_lang_code = system_lang_code
+        if system_version:
+            official_api_old.system_version = system_version
+        if lang_pack:
+            official_api_old.lang_pack = lang_pack
+            official_api_old.lang_code = lang_pack
+        
+        client_old = OpenteleClient(
+            session=str(session_copy),
+            api=official_api_old,
+            proxy=proxy_dict
         )
         await client_old.connect()
         
@@ -529,14 +589,34 @@ async def process_single_account(session_path, json_path, two_fa, user_id, sessi
         me = await client_old.get_me()
         phone = me.phone
         
+        if not json_path or not os.path.exists(json_path):
+            generated_json = await generate_json_for_session(
+                session_path, client_old, me, api_id_val, api_hash_val, official_api_old
+            )
+            if generated_json:
+                json_path = generated_json
+        
         proxy_new = get_random_proxy()
         proxy_dict_new = create_proxy_dict(proxy_new) if proxy_new else None
         
-
-        client_new = TelegramClient(
-            session=str(new_session_path), 
-            api_id=2040, 
-            api_hash="b18441a1ff607e10a989891a5462e627",
+        official_api_new = API.TelegramDesktop.Generate()
+        official_api_new.api_id = api_id_val
+        official_api_new.api_hash = api_hash_val
+        if device_model:
+            official_api_new.device_model = device_model
+        if app_version:
+            official_api_new.app_version = app_version
+        if system_lang_code:
+            official_api_new.system_lang_code = system_lang_code
+        if system_version:
+            official_api_new.system_version = system_version
+        if lang_pack:
+            official_api_new.lang_pack = lang_pack
+            official_api_new.lang_code = lang_pack
+        
+        client_new = OpenteleClient(
+            session=str(new_session_path),
+            api=official_api_new,
             proxy=proxy_dict_new
         )
         await client_new.connect()
@@ -546,7 +626,6 @@ async def process_single_account(session_path, json_path, two_fa, user_id, sessi
         
         messages = await client_old.get_messages(777000, limit=3)
         code = None
-        
         for msg in messages:
             if msg.text:
                 match = re.search(r'(\d{5,6})', msg.text)
@@ -570,24 +649,35 @@ async def process_single_account(session_path, json_path, two_fa, user_id, sessi
         await client_new.get_me()
         await client_old.log_out()
         
-
         new_json_data = {
-            "api_id": orig_json_data.get("api_id", api_id_val),
-            "api_hash": orig_json_data.get("api_hash", api_hash_val),
-            "system_lang_code": orig_json_data.get("system_lang_code", "es-mx"),
-            "lang_code": orig_json_data.get("lang_code", "id"),
+            "api_id": api_id_val,
+            "api_hash": api_hash_val,
+            "device_model": official_api_new.device_model,
+            "system_version": official_api_new.system_version,
+            "app_version": official_api_new.app_version,
+            "system_lang_code": official_api_new.system_lang_code,
+            "lang_pack": official_api_new.lang_pack,
+            "lang_code": official_api_new.lang_code,
+            "pid": getattr(official_api_new, 'pid', random.randint(100000, 999999)),
             "user_id": me.id,
             "phone": phone,
             "twofa": two_fa if two_fa else "",
-            "app_id": orig_json_data.get("app_id", api_id_val),
-            "app_hash": orig_json_data.get("app_hash", api_hash_val),
+            "password": "",
+            "app_id": api_id_val,
+            "app_hash": api_hash_val,
             "session_file": f"{session_name}_new",
+            "device": official_api_new.device_model,
             "username": me.username or "",
-            "ipv6": orig_json_data.get("ipv6", False),
-            "pref_cat": orig_json_data.get("pref_cat", 2),
-            "block": orig_json_data.get("block", False),
-            "system_lang_pack": orig_json_data.get("system_lang_pack", "es-mx"),
-            "premium": getattr(me, 'premium', False)
+            "sex": None,
+            "avatar": "img/default.png",
+            "package_id": "",
+            "installer": "",
+            "ipv6": False,
+            "SDK": official_api_new.system_version,
+            "sdk": official_api_new.system_version,
+            "system_lang_pack": official_api_new.system_lang_code,
+            "premium": getattr(me, 'premium', False),
+            "reg_time": datetime.now().strftime("%Y-%m-%d")
         }
         
         new_json_path = os.path.join(temp_dir, f"{session_name}_new.json")
