@@ -365,6 +365,60 @@ async def handle_privacy_document(update: Update, context: ContextTypes.DEFAULT_
         except:
             pass
 
+async def generate_json_for_session(session_file, client, me, api_id, api_hash, official_api):
+    json_path = session_file.replace('.session', '.json')
+    phone = me.phone if me.phone else os.path.basename(session_file).replace('.session', '')
+    reg_time = datetime.now().strftime("%Y-%m-%d")
+    
+    device_model = getattr(official_api, 'device_model', 'Desktop')
+    system_version = getattr(official_api, 'system_version', '')
+    app_version = getattr(official_api, 'app_version', '')
+    system_lang_code = getattr(official_api, 'system_lang_code', 'en')
+    lang_pack = getattr(official_api, 'lang_pack', '')
+    lang_code = getattr(official_api, 'lang_code', 'en')
+    pid = getattr(official_api, 'pid', random.randint(100000, 999999))
+    
+    json_data = {
+        "api_id": api_id,
+        "api_hash": api_hash,
+        "device_model": device_model,
+        "system_version": system_version,
+        "app_version": app_version,
+        "system_lang_code": system_lang_code,
+        "lang_pack": lang_pack,
+        "lang_code": lang_code,
+        "pid": pid,
+        "user_id": me.id,
+        "phone": phone,
+        "twofa": "",
+        "password": "",
+        "app_id": api_id,
+        "app_hash": api_hash,
+        "session_file": os.path.basename(session_file).replace('.session', ''),
+        "device": device_model,
+        "username": me.username or "",
+        "sex": None,
+        "avatar": "img/default.png",
+        "package_id": "",
+        "installer": "",
+        "ipv6": False,
+        "SDK": system_version,
+        "sdk": system_version,
+        "system_lang_pack": system_lang_code,
+        "premium": getattr(me, 'premium', False),
+        "reg_time": reg_time
+    }
+    
+    try:
+        os.makedirs(os.path.dirname(json_path), exist_ok=True)
+        with open(json_path, 'w', encoding='utf-8') as f:
+            json.dump(json_data, f, indent=2, ensure_ascii=False)
+        logger.info(f"已为 {session_file} 生成 JSON 配置: {json_path}")
+        return json_path
+    except Exception as e:
+        logger.error(f"生成 JSON 失败 {session_file}: {e}")
+        return None
+
 async def apply_privacy_settings(client, settings):
     try:
         applied = []
@@ -393,14 +447,18 @@ async def check_session_privacy(session_file, json_file, api_id, api_hash, priva
         "session": os.path.basename(session_file),
         "status": "unknown",
         "message": "",
+        "json_path": None,
     }
     json_config = {}
-    if json_file and os.path.exists(json_file):
+    final_json_file = json_file if json_file and os.path.exists(json_file) else None
+    
+    if final_json_file:
         try:
-            with open(json_file, 'r', encoding='utf-8') as f:
+            with open(final_json_file, 'r', encoding='utf-8') as f:
                 json_config = json.load(f)
         except Exception as e:
-            logger.warning(f"读取 JSON 配置失败 {json_file}: {e}")
+            logger.warning(f"读取 JSON 配置失败 {final_json_file}: {e}")
+            final_json_file = None
     
     final_api_id = api_id
     final_api_hash = api_hash
@@ -416,7 +474,7 @@ async def check_session_privacy(session_file, json_file, api_id, api_hash, priva
     device_model = json_config.get('device') or None
     app_version = json_config.get('app_version') or None
     system_lang_code = json_config.get('system_lang_pack') or None
-    system_vision = json_config.get('sdk') or None
+    system_vision = json_config.get('system_vision') or json_config.get('sdk') or None
     lang_pack = json_config.get('lang_pack') or None
     
     proxy = get_random_proxy()
@@ -457,6 +515,14 @@ async def check_session_privacy(session_file, json_file, api_id, api_hash, priva
             return result
         
         result["phone"] = me.phone
+        if not final_json_file:
+            generated_path = await generate_json_for_session(
+                session_file, client, me, final_api_id, final_api_hash, official_api
+            )
+            if generated_path:
+                final_json_file = generated_path
+                result["json_path"] = generated_path
+                logger.info(f"为 {session_file} 生成了新的 JSON 文件")
         
         success, msg = await apply_privacy_settings(client, privacy_settings_data)
         if success:
@@ -634,9 +700,10 @@ async def _process_privacy_internal(update, context, zip_path, user_id, api_id, 
             except:
                 pass
             
-            if json_file and os.path.exists(json_file):
+            json_path_to_copy = result.get("json_path") or json_file
+            if json_path_to_copy and os.path.exists(json_path_to_copy):
                 try:
-                    shutil.copy2(json_file, os.path.join(target_dir, os.path.basename(json_file)))
+                    shutil.copy2(json_path_to_copy, os.path.join(target_dir, os.path.basename(json_path_to_copy)))
                 except:
                     pass
             
