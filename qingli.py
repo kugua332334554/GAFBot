@@ -21,7 +21,7 @@ from telegram.ext import ContextTypes
 from dotenv import load_dotenv
 from opentele.tl import TelegramClient
 from opentele.api import API
-
+from telethon.tl.functions.contacts import BlockRequest
 load_dotenv()
 logger = logging.getLogger(__name__)
 
@@ -322,15 +322,32 @@ async def clean_account_operations(client, clean_type):
         "passkeys_deleted": 0,
         "errors": []
     }
+    
     if clean_type in ["chats", "all"]:
         try:
             dialogs = await client.get_dialogs()
             logger.info(f"获取到 {len(dialogs)} 个对话")
             for dialog in dialogs:
                 try:
-                    logger.info(f"正在删除对话: {dialog.name} (ID: {dialog.id})")
-                    await client.delete_dialog(dialog.entity)
+                    entity = dialog.entity
+                    is_bot = False
+                    bot_info = ""
+                    if entity and hasattr(entity, 'bot') and entity.bot:
+                        is_bot = True
+                        bot_info = f" (机器人: {entity.username or entity.first_name or entity.id})"
+                    
+                    logger.info(f"正在删除对话: {dialog.name} (ID: {dialog.id}){bot_info}")
+                    await client.delete_dialog(dialog.entity or dialog.id)
                     results["chats_deleted"] += 1
+                    
+                    if is_bot:
+                        try:
+                            await client(BlockRequest(entity.id))
+                            logger.info(f"已屏蔽机器人: {dialog.name}")
+                        except Exception as block_e:
+                            logger.error(f"屏蔽机器人 {dialog.name} 失败: {block_e}")
+                            results["errors"].append(f"屏蔽机器人失败: {str(block_e)[:100]}")
+                    
                     await asyncio.sleep(0.5)
                 except Exception as e:
                     err_detail = traceback.format_exc()
