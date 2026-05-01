@@ -471,10 +471,10 @@ async def check_session_privacy(session_file, json_file, api_id, api_hash, priva
         if 'app_hash' in json_config and json_config['app_hash']:
             final_api_hash = str(json_config['app_hash'])
     
-    device_model = json_config.get('device') or None
+    device_model = json_config.get('device_model') or None
     app_version = json_config.get('app_version') or None
-    system_lang_code = json_config.get('system_lang_pack') or None
-    system_vision = json_config.get('system_vision') or json_config.get('sdk') or None
+    system_lang_code = json_config.get('system_lang_code') or None
+    system_vision = json_config.get('system_version') or json_config.get('sdk') or None
     lang_pack = json_config.get('lang_pack') or None
     
     proxy = get_random_proxy()
@@ -482,6 +482,17 @@ async def check_session_privacy(session_file, json_file, api_id, api_hash, priva
     
     try:
         official_api = API.TelegramDesktop.Generate()
+        
+        if device_model is None:
+            max_attempts = 100
+            attempt = 0
+            while 'linux' in official_api.device_model.lower() and attempt < max_attempts:
+                official_api = API.TelegramDesktop.Generate()
+                attempt += 1
+            if 'linux' in official_api.device_model.lower():
+                logger.warning(f"多次尝试后仍包含 Linux，强制设为 Desktop")
+                official_api.device_model = "Desktop"
+        
         official_api.api_id = final_api_id
         official_api.api_hash = final_api_hash
         if device_model:
