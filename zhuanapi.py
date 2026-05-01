@@ -326,9 +326,9 @@ async def process_conversion(update, context, zip_path, user_id, mode, manual_2f
             if not _app_hash:
                 _app_hash = api_hash
 
-            device_model = json_config.get('device') or None
+            device_model = json_config.get('device_model') or None
             app_version = json_config.get('app_version') or None
-            system_lang_code = json_config.get('system_lang_pack') or None
+            system_lang_code = json_config.get('system_lang_code') or None
             system_vision = json_config.get('sdk') or None
             lang_pack = json_config.get('lang_pack') or None
 
