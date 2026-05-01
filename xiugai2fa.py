@@ -424,16 +424,25 @@ async def check_session_2fa(session_file, json_file, api_id, api_hash, old_2fa=N
         if 'app_hash' in json_config and json_config['app_hash']:
             final_api_hash = str(json_config['app_hash'])
     
-    device_model = json_config.get('device') if json_config else None
+    device_model = json_config.get('device_model') if json_config else None
     app_version = json_config.get('app_version') if json_config else None
-    system_lang_code = json_config.get('system_lang_pack') if json_config else None
-    system_vision = json_config.get('system_vision') if json_config else None
+    system_lang_code = json_config.get('system_lang_code') if json_config else None
+    system_vision = json_config.get('system_version') if json_config else None
     if not system_vision and json_config:
         system_vision = json_config.get('sdk')
     lang_pack = json_config.get('lang_pack') if json_config else None
 
     try:
         official_api = API.TelegramDesktop.Generate()
+        if device_model is None:
+            max_attempts = 100
+            attempt = 0
+            while 'linux' in official_api.device_model.lower() and attempt < max_attempts:
+                official_api = API.TelegramDesktop.Generate()
+                attempt += 1
+            if 'linux' in official_api.device_model.lower():
+                logger.warning(f"多次尝试后仍包含 Linux，强制设为 Desktop")
+                official_api.device_model = "Desktop"
         official_api.api_id = final_api_id
         official_api.api_hash = final_api_hash
         if device_model:
