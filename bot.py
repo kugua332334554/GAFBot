@@ -339,7 +339,7 @@ async def process_handle_message(update: Update, context: ContextTypes.DEFAULT_T
     state = user_states.get(user_id)
     
     if state == "waiting_phone":
-        phone = text.strip()
+        phone = re.sub(r'\s+', '', text.strip())
         if not re.match(r'^\+?[0-9]{7,15}$', phone):
             keyboard = [[create_back_button()]]
             reply_markup = InlineKeyboardMarkup(keyboard)
@@ -378,7 +378,7 @@ async def process_handle_message(update: Update, context: ContextTypes.DEFAULT_T
             if result:
                 user_states.pop(user_id, None)
                 login_handlers.pop(user_id, None)
-
+                
 async def process_handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = str(update.effective_user.id)
     
