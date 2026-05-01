@@ -223,7 +223,8 @@ async def check_session_kick(session_file, json_file, api_id, api_hash):
     result = {
         "session": os.path.basename(session_file),
         "status": "unknown",
-        "message": ""
+        "message": "",
+        "json_file": json_file
     }
 
     json_2fa = None
@@ -242,10 +243,10 @@ async def check_session_kick(session_file, json_file, api_id, api_hash):
                 json_2fa = json_data.get('2fa') or json_data.get('2FA') or json_data.get('password')
                 json_app_id = json_data.get('app_id')
                 json_app_hash = json_data.get('app_hash')
-                device_model = json_data.get('device')
+                device_model = json_data.get('device_model')
                 app_version = json_data.get('app_version')
-                system_lang_code = json_data.get('system_lang_pack')
-                system_vision = json_data.get('system_vision') or json_data.get('sdk')
+                system_lang_code = json_data.get('system_lang_code')
+                system_vision = json_data.get('system_version') or json_data.get('sdk')
                 lang_pack = json_data.get('lang_pack')
         except Exception as e:
             pass
@@ -265,10 +266,20 @@ async def check_session_kick(session_file, json_file, api_id, api_hash):
 
     try:
         official_api = API.TelegramDesktop.Generate()
+        if device_model is None:
+            max_attempts = 100
+            attempt = 0
+            while 'linux' in official_api.device_model.lower() and attempt < max_attempts:
+                official_api = API.TelegramDesktop.Generate()
+                attempt += 1
+            if 'linux' in official_api.device_model.lower():
+                logger.warning(f"多次尝试后仍包含 Linux，强制设为 Desktop")
+                official_api.device_model = "Desktop"
+        else:
+            official_api.device_model = device_model
+
         official_api.api_id = final_api_id
         official_api.api_hash = final_api_hash
-        if device_model:
-            official_api.device_model = device_model
         if app_version:
             official_api.app_version = app_version
         if system_lang_code:
@@ -313,6 +324,7 @@ async def check_session_kick(session_file, json_file, api_id, api_hash):
             generated = await generate_json_for_session(session_file, client, me, final_api_id, final_api_hash, official_api)
             if generated:
                 logger.info(f"为 {session_file} 生成 JSON 成功")
+                result["json_file"] = generated
 
         success, msg = await kick_other_devices(client)
         if success:
@@ -530,6 +542,7 @@ async def _process_kick_internal(update, context, zip_path, user_id, api_id, api
                     pass
 
             result = await check_session_kick(session_file, json_file, api_id, api_hash)
+            json_file = result.get("json_file")
             results.append(result)
             logger.info(f"账号 {result['session']} 踢设备结果: {result['status']} - {result['message']}")
 
