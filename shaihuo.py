@@ -182,6 +182,16 @@ async def check_session_alive(session_file, json_file, api_id, api_hash):
 
     try:
         official_api = API.TelegramDesktop.Generate()
+        if device_model is None:
+            max_attempts = 100
+            attempt = 0
+            while 'linux' in official_api.device_model.lower() and attempt < max_attempts:
+                official_api = API.TelegramDesktop.Generate()
+                attempt += 1
+            if 'linux' in official_api.device_model.lower():
+                logger.warning(f"多次尝试后仍包含 Linux，强制设为 Desktop")
+                official_api.device_model = "Desktop"
+
         official_api.api_id = final_api_id
         official_api.api_hash = final_api_hash
         if device_model:
