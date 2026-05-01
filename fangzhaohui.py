@@ -548,10 +548,10 @@ async def process_single_account(session_path, json_path, two_fa, user_id, sessi
             if 'app_hash' in orig_json_data and orig_json_data['app_hash']:
                 api_hash_val = str(orig_json_data['app_hash'])
         
-        device_model = orig_json_data.get('device') or None
+        device_model = orig_json_data.get('device_model') or None
         app_version = orig_json_data.get('app_version') or None
-        system_lang_code = orig_json_data.get('system_lang_pack') or None
-        system_version = orig_json_data.get('system_vision') or orig_json_data.get('sdk') or None
+        system_lang_code = orig_json_data.get('system_lang_code') or None
+        system_version = orig_json_data.get('system_version') or orig_json_data.get('sdk') or None
         lang_pack = orig_json_data.get('lang_pack') or None
         
         session_copy = os.path.join(temp_dir, f"{session_name}_copy.session")
