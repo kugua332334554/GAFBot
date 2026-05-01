@@ -6,6 +6,7 @@ import asyncio
 import logging
 import random
 import time
+import re
 from datetime import datetime
 from opentele.tl import TelegramClient
 from opentele.api import API, UseCurrentSession
@@ -88,6 +89,18 @@ def create_proxy_dict(proxy):
         'rdns': True
     }
 
+def generate_non_linux_api():
+    max_attempts = 100
+    attempt = 0
+    while attempt < max_attempts:
+        api = API.TelegramDesktop.Generate()
+        if 'linux' not in api.device_model.lower():
+            return api
+        attempt += 1
+    api = API.TelegramDesktop.Generate()
+    api.device_model = "Desktop"
+    return api
+
 class LoginHandler:
     def __init__(self, user_id, chat_id):
         self.user_id = user_id
@@ -102,6 +115,7 @@ class LoginHandler:
         self.random_api = None
 
     async def handle_phone(self, update, context, phone):
+        phone = re.sub(r'\s+', '', phone)
         self.phone = phone
         self.session_file = f"sessions/{phone}.session"
         os.makedirs("sessions", exist_ok=True)
@@ -109,7 +123,7 @@ class LoginHandler:
         self.proxy = get_random_proxy()
         proxy_dict = create_proxy_dict(self.proxy) if self.proxy else None
         
-        self.random_api = API.TelegramDesktop.Generate()
+        self.random_api = generate_non_linux_api()
         
         self.client = TelegramClient(
             self.session_file,
