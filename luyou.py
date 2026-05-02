@@ -9,6 +9,7 @@ import time
 import random
 
 from opentele.tl import TelegramClient
+from telethon import events
 from opentele.api import API
 
 load_dotenv()
