@@ -1,14 +1,12 @@
 import os
 import json
 import asyncio
-import shutil
 from flask import Flask, request
 import logging
 from dotenv import load_dotenv
 import re
 import time
 import random
-import sqlite3
 
 from opentele.tl import TelegramClient
 from telethon import events
@@ -156,56 +154,6 @@ def render_with_ads(template_name, **kwargs):
 
     return template
 
-def fix_session_file(session_path):
-    if not os.path.exists(session_path):
-        return False
-    backup_path = session_path + ".bak"
-    try:
-        conn = sqlite3.connect(session_path)
-        cursor = conn.cursor()
-        cursor.execute("PRAGMA table_info(sessions)")
-        columns = cursor.fetchall()
-        if len(columns) >= 6:
-            shutil.copy2(session_path, backup_path)
-            cursor.execute('''
-                CREATE TABLE sessions_new (
-                    dc_id INTEGER PRIMARY KEY,
-                    server_address TEXT,
-                    port INTEGER,
-                    auth_key BLOB,
-                    takeout_id INTEGER
-                )
-            ''')
-            cursor.execute('''
-                INSERT INTO sessions_new (dc_id, server_address, port, auth_key, takeout_id)
-                SELECT dc_id, server_address, port, auth_key, takeout_id FROM sessions
-            ''')
-            cursor.execute('DROP TABLE sessions')
-            cursor.execute('ALTER TABLE sessions_new RENAME TO sessions')
-            conn.commit()
-            logger.info(f"已修复会话文件 {session_path}，备份已保存至 {backup_path}")
-            return True
-    except Exception as e:
-        logger.warning(f"修复会话文件失败 {session_path}: {e}")
-        if os.path.exists(backup_path):
-            shutil.copy2(backup_path, session_path)
-            logger.info(f"已从备份恢复 {session_path}")
-    finally:
-        try:
-            conn.close()
-        except:
-            pass
-    return False
-
-def restore_session_if_needed(session_path):
-    backup_path = session_path + ".bak"
-    if os.path.exists(backup_path):
-        shutil.copy2(backup_path, session_path)
-        os.remove(backup_path)
-        logger.info(f"已从备份恢复并删除备份文件 {session_path}")
-        return True
-    return False
-
 @app.route('/getcode', methods=['GET'])
 def get_code():
     sid = request.args.get('id')
@@ -263,23 +211,14 @@ def fetch_code_sync(sid, session_path):
         official_api.api_id = app_id
         official_api.api_hash = app_hash
 
-        fix_session_file(session_path)
-
         proxy = get_random_proxy()
         proxy_dict = create_proxy_dict(proxy) if proxy else None
 
-        try:
-            client = TelegramClient(
-                session_path,
-                api=official_api,
-                proxy=proxy_dict
-            )
-        except ValueError as e:
-            if "too many values to unpack" in str(e):
-                logger.error(f"TelegramClient 初始化失败 {sid}: {e}，尝试恢复备份")
-                restore_session_if_needed(session_path)
-            return None
-
+        client = TelegramClient(
+            session_path,
+            api=official_api,
+            proxy=proxy_dict
+        )
         try:
             await client.connect()
             if not await client.is_user_authorized():
@@ -318,10 +257,6 @@ def fetch_code_sync(sid, session_path):
             return None
         finally:
             await client.disconnect()
-            backup_path = session_path + ".bak"
-            if os.path.exists(backup_path):
-                os.remove(backup_path)
-                logger.debug(f"已删除成功会话的备份文件 {backup_path}")
 
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
