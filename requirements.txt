@@ -34,7 +34,7 @@ requests==2.33.1
 rsa==4.9.1
 six==1.17.0
 sniffio==1.3.1
-Telethon==1.35.0
+Telethon
 TgCrypto==1.2.5
 typing_extensions==4.15.0
 tzlocal==5.3.1
