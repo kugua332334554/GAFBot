@@ -47,6 +47,10 @@ from fangzhaohui import (
     handle_recovery_skip, user_recovery_states
 )
 from xiaohui import handle_destroy_document, DESTROY_BACK
+from passkey import (
+    show_passkey_menu, handle_passkey_selection, handle_passkey_document,
+    user_passkey_states, PASSKEY_BACK
+)
 
 load_dotenv()
 TOKEN = os.getenv("BOT_TOKEN")
@@ -305,6 +309,12 @@ async def process_button_callback(update: Update, context: ContextTypes.DEFAULT_
             reply_markup=reply_markup
         )
         user_states[user_id] = "waiting_destroy_zip"
+    elif data == "passkey_menu":
+        await show_passkey_menu(update, context)
+        
+    elif data in ["passkey_create", "passkey_login"]:
+        await handle_passkey_selection(update, context)
+
 
 async def process_handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = str(update.effective_user.id)
@@ -411,6 +421,10 @@ async def process_handle_document(update: Update, context: ContextTypes.DEFAULT_
     
     if user_id in user_unpack_states and user_unpack_states[user_id].get("waiting_zip"):
         await handle_unpack_document(update, context, user_id)
+        return
+    
+    if user_id in user_passkey_states and user_passkey_states[user_id].get("waiting_zip"):
+        await handle_passkey_document(update, context, user_id)
         return
     
     if user_states.get(user_id) == "waiting_destroy_zip":
@@ -718,7 +732,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
              btn("筛料能力", "check_material", "5944940516754853337")],
             [btn("清理账号", "clean_account", "6007942490076745785"),
              btn("拆包工具", "unpack_tool", "5877540355187937244")],
-            [btn("销毁会话", "destroy_session", "5879937509579820068")],
+            [btn("销毁会话", "destroy_session", "5879937509579820068"),
+             btn("Passkey功能", "passkey_menu", "6008118472066732010")],
         ]
         
         for i in range(1, 4):
