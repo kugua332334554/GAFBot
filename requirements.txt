@@ -26,6 +26,8 @@ pyaes==1.6.1
 pyasn1==0.6.2
 PyQt5==5.15.11
 PyQt5-Qt5==5.15.18
+cbor2
+cryptography
 PyQt5_sip==12.18.0
 python-dotenv==1.0.0
 python-telegram-bot
