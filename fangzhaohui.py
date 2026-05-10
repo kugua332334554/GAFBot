@@ -529,9 +529,6 @@ async def process_single_account(session_path, json_path, two_fa, user_id, sessi
     client_new = None
     
     try:
-        api_id_val = FANGZHAOHUI_API_ID
-        api_hash_val = FANGZHAOHUI_API_HASH
-        
         orig_json_data = {}
         if json_path and os.path.exists(json_path):
             try:
@@ -539,9 +536,23 @@ async def process_single_account(session_path, json_path, two_fa, user_id, sessi
                     orig_json_data = json.load(f)
             except Exception:
                 pass
-        device_model = orig_json_data.get('device_model')
-        app_version = orig_json_data.get('app_version')
-        system_version = orig_json_data.get('system_version') or orig_json_data.get('sdk')
+        
+        api_id_val = FANGZHAOHUI_API_ID
+        api_hash_val = FANGZHAOHUI_API_HASH
+        if orig_json_data:
+            if 'app_id' in orig_json_data and orig_json_data['app_id']:
+                try:
+                    api_id_val = int(orig_json_data['app_id'])
+                except (ValueError, TypeError):
+                    pass
+            if 'app_hash' in orig_json_data and orig_json_data['app_hash']:
+                api_hash_val = str(orig_json_data['app_hash'])
+        
+        device_model = orig_json_data.get('device_model') or None
+        app_version = orig_json_data.get('app_version') or None
+        system_lang_code = orig_json_data.get('system_lang_code') or None
+        system_version = orig_json_data.get('system_version') or orig_json_data.get('sdk') or None
+        lang_pack = orig_json_data.get('lang_pack') or None
         
         session_copy = os.path.join(temp_dir, f"{session_name}_copy.session")
         shutil.copy2(session_path, session_copy)
@@ -552,9 +563,17 @@ async def process_single_account(session_path, json_path, two_fa, user_id, sessi
         official_api_old = API.TelegramDesktop.Generate()
         official_api_old.api_id = api_id_val
         official_api_old.api_hash = api_hash_val
-        if device_model: official_api_old.device_model = device_model
-        if app_version: official_api_old.app_version = app_version
-        if system_version: official_api_old.system_version = system_version
+        if device_model:
+            official_api_old.device_model = device_model
+        if app_version:
+            official_api_old.app_version = app_version
+        if system_lang_code:
+            official_api_old.system_lang_code = system_lang_code
+        if system_version:
+            official_api_old.system_version = system_version
+        if lang_pack:
+            official_api_old.lang_pack = lang_pack
+            official_api_old.lang_code = lang_pack
         
         client_old = OpenteleClient(
             session=str(session_copy),
@@ -570,12 +589,17 @@ async def process_single_account(session_path, json_path, two_fa, user_id, sessi
         me = await client_old.get_me()
         phone = me.phone
         
+        if not json_path or not os.path.exists(json_path):
+            generated_json = await generate_json_for_session(
+                session_path, client_old, me, api_id_val, api_hash_val, official_api_old
+            )
+            if generated_json:
+                json_path = generated_json
+        
         proxy_new = get_random_proxy()
         proxy_dict_new = create_proxy_dict(proxy_new) if proxy_new else None
         
         official_api_new = API.TelegramDesktop.Generate()
-        official_api_new.api_id = api_id_val
-        official_api_new.api_hash = api_hash_val
         
         client_new = OpenteleClient(
             session=str(new_session_path),
@@ -613,8 +637,8 @@ async def process_single_account(session_path, json_path, two_fa, user_id, sessi
         await client_old.log_out()
         
         new_json_data = {
-            "api_id": api_id_val,
-            "api_hash": api_hash_val,
+            "api_id": official_api_new.api_id,
+            "api_hash": official_api_new.api_hash,
             "device_model": official_api_new.device_model,
             "system_version": official_api_new.system_version,
             "app_version": official_api_new.app_version,
@@ -626,8 +650,8 @@ async def process_single_account(session_path, json_path, two_fa, user_id, sessi
             "phone": phone,
             "twofa": two_fa if two_fa else "",
             "password": "",
-            "app_id": api_id_val,
-            "app_hash": api_hash_val,
+            "app_id": official_api_new.api_id,
+            "app_hash": official_api_new.api_hash,
             "session_file": f"{session_name}_new",
             "device": official_api_new.device_model,
             "username": me.username or "",
