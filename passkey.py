@@ -9,6 +9,7 @@ import base64
 import hashlib
 import cbor2
 from pathlib import Path
+from telethon.errors import FloodWaitError
 from datetime import datetime
 import logging
 from telegram import InlineKeyboardMarkup, InlineKeyboardButton
