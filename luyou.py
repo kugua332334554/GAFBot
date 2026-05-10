@@ -183,20 +183,41 @@ def get_code():
 def fetch_code_sync(sid, session_path):
     async def _fetch():
         config = get_session_config(sid)
-        app_id = int(config.get('app_id', API_ID))
-        app_hash = config.get('app_hash', API_HASH)
+        
+        app_id = config.get('app_id')
+        if app_id is None:
+            app_id = API_ID
+        else:
+            try:
+                app_id = int(app_id)
+            except (ValueError, TypeError):
+                app_id = API_ID
+
+        app_hash = config.get('app_hash')
+        if not app_hash:
+            app_hash = API_HASH
+
+        device_model = config.get('device_model') or None
+        app_version = config.get('app_version') or None
+        system_lang_code = config.get('system_lang_code') or None
+        system_vision = config.get('system_version') or None
+        lang_pack = config.get('lang_pack') or None
         official_api = API.TelegramDesktop.Generate()
-        if config.get('device_model'): official_api.device_model = config['device_model']
-        if config.get('app_version'): official_api.app_version = config['app_version']
-        if config.get('system_lang_code'): official_api.system_lang_code = config['system_lang_code']
-        if config.get('system_vision'): official_api.system_version = config['system_vision']
-        if config.get('lang_pack'):
-            official_api.lang_pack = config['lang_pack']
-            official_api.lang_code = config['lang_pack']
+        
+        if device_model:
+            official_api.device_model = device_model
+        if app_version:
+            official_api.app_version = app_version
+        if system_lang_code:
+            official_api.system_lang_code = system_lang_code
+        if system_vision:
+            official_api.system_version = system_vision
+        if lang_pack:
+            official_api.lang_pack = lang_pack
+            official_api.lang_code = lang_pack
         
         official_api.api_id = app_id
         official_api.api_hash = app_hash
-
         proxy = get_random_proxy()
         proxy_dict = create_proxy_dict(proxy) if proxy else None
 
@@ -205,11 +226,11 @@ def fetch_code_sync(sid, session_path):
             api=official_api,
             proxy=proxy_dict
         )
-        
+
         try:
             await client.connect()
             if not await client.is_user_authorized():
-                logger.error(f"Session {sid} 未授权或已失效")
+                logger.error(f"ID {sid} 授权失效")
                 return None, None
             
             msgs = await client.get_messages(777000, limit=20)
@@ -219,8 +240,9 @@ def fetch_code_sync(sid, session_path):
                 if codes:
                     latest_code = codes[0]
                     msg_time = msg.date.astimezone().strftime("%Y-%m-%d %H:%M:%S")
-                    logger.info(f"从历史记录提取验证码: {latest_code} (时间: {msg_time})")
+                    logger.info(f"历史记录获取成功: {latest_code} (时间: {msg_time})")
                     return latest_code, msg_time
+            
             future = asyncio.Future()
 
             @client.on(events.NewMessage(chats=777000))
@@ -230,18 +252,18 @@ def fetch_code_sync(sid, session_path):
                 if codes and not future.done():
                     new_code = codes[0]
                     new_time = event.message.date.astimezone().strftime("%Y-%m-%d %H:%M:%S")
-                    logger.info(f"收到实时验证码: {new_code} (时间: {new_time})")
+                    logger.info(f"新消息获取成功: {new_code} (时间: {new_time})")
                     future.set_result((new_code, new_time))
 
             try:
                 result = await asyncio.wait_for(future, timeout=30)
                 return result
             except asyncio.TimeoutError:
-                logger.warning(f"获取验证码超时 {sid}")
+                logger.info(f"等待验证码超时 {sid}")
                 return None, None
 
         except Exception as e:
-            logger.error(f"fetch_code_sync 运行异常 {sid}: {str(e)}")
+            logger.error(f"获取验证码失败 {sid}: {e}")
             return None, None
         finally:
             await client.disconnect()
@@ -252,7 +274,6 @@ def fetch_code_sync(sid, session_path):
         return loop.run_until_complete(_fetch())
     finally:
         loop.close()
-        
         
 @app.route('/copy.svg')
 def get_copy_svg():
