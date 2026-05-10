@@ -1,249 +1,478 @@
 <!DOCTYPE html>
-<html lang="zh-CN">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>成功找到绒布球喵~</title>
-    <link rel="stylesheet" href="https://unpkg.com/mdui@2/mdui.css">
-    <script src="https://unpkg.com/mdui@2/mdui.global.js"></script>
-    <link href="https://fonts.googleapis.com/icon?family=Material+Icons" rel="stylesheet">
+<html lang="zh-cn"><head><meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+  
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>
+    Telegram 登录接码工具
     
-    <style>
-        :root {
-            --mdui-color-primary: #0bbd49; 
-        }
+  </title>
+  <meta name="description" content="
+    Telegram 登录接码工具
+    ">
+  <script>
+    window.dataLayer = window.dataLayer || [];
+    function gtag() { dataLayer.push(arguments); }
+    gtag('js', new Date());
+    gtag('config', 'G-9VRQHT9YPH');
+  </script>
 
-        body {
-            background-color: rgb(var(--mdui-color-surface-container-low));
-            display: flex;
-            justify-content: center;
-            align-items: center;
-            min-height: 100vh;
-            margin: 0;
-            font-family: 'Roboto', 'Noto Sans SC', sans-serif;
-            -webkit-font-smoothing: antialiased;
-        }
+<style>
+    #ads-container {
+        display: flex;
+        flex-direction: column; 
+        align-items: center;    
+        gap: 15px;     
+        padding: 20px;
+        width: 100%;
+        box-sizing: border-box;
+    }
 
-        .result-card {
-            display: flex;
-            width: calc(100% - 32px);
-            max-width: 900px;
-            min-height: 600px;
-            border-radius: 28px;
-            overflow: hidden;
-            animation: m3-entrance 0.6s cubic-bezier(0.34, 1.56, 0.64, 1);
-            background-color: rgb(var(--mdui-color-surface));
-        }
+    .ad-pill {
+        display: block;         
+        width: 100%;         
+        max-width: 300px;     
+        padding: 12px 0;      
+        text-align: center;    
+        background-color: #007bff;
+        color: white !important;
+        text-decoration: none;
+        
+        border-radius: 50px; 
+        
+        font-size: 16px;
+        font-weight: 500;
+        box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+        transition: all 0.2s ease;
+    }
 
-        @keyframes m3-entrance {
-            from { opacity: 0; transform: scale(0.9) translateY(30px); }
-            to { opacity: 1; transform: scale(1) translateY(0); }
-        }
+    .ad-pill:hover {
+        background-color: #0056b3;
+        transform: scale(1.02); 
+        box-shadow: 0 6px 12px rgba(0,0,0,0.15);
+    }
+</style>
+  <style>
+    :root {
+      --tg-theme-bg-color: #ffffff;
+      --tg-theme-text-color: #000000;
+      --tg-theme-hint-color: #999999;
+      --tg-theme-link-color: #2481cc;
+      --tg-theme-button-color: #50a8eb;
+      --tg-theme-button-text-color: #ffffff;
+      --tg-theme-secondary-bg-color: #f4f4f5;
+      --tg-theme-header-bg-color: #50a8eb;
+      --tg-theme-accent-text-color: #50a8eb;
+      --tg-theme-section-bg-color: #f4f4f5;
+      --tg-theme-section-header-text-color: #86888a;
+      --tg-theme-subtitle-text-color: #86888a;
+      --tg-theme-destructive-text-color: #df3f40;
+    }
 
-        .side-status {
-            width: 35%;
-            background-color: var(--mdui-color-primary);
-            display: flex;
-            flex-direction: column;
-            justify-content: center;
-            align-items: center;
-            color: white;
-            padding: 24px;
-        }
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+    }
 
-        .side-status mdui-typography[variant="title-large"] {
-            font-size: 30px !important;
-            font-weight: 400;
-            margin-top: 12px;
-        }
+    body {
+      background-color: var(--tg-theme-secondary-bg-color);
+      color: var(--tg-theme-text-color);
+      display: flex;
+      flex-direction: column;
+      min-height: 100vh;
+      justify-content: center;
+      align-items: center;
+      padding: 20px;
+    }
 
-        .content-area {
-            flex: 1;
-            padding: 40px 48px;
-            display: flex;
-            flex-direction: column;
-            justify-content: center;
-            background-color: rgb(var(--mdui-color-surface));
-        }
+    .container {
+      width: 100%;
+      max-width: 800px;
+      margin: 0 auto;
+      display: flex;
+      flex-direction: column;
+      min-height: calc(100vh - 40px);
+      position: relative;
+    }
 
-        .code-section {
-            display: flex;
-            flex-direction: column;
-            gap: 16px;
-            margin-bottom: 32px;
-        }
+    .main-content {
+      display: flex;
+      flex-direction: column;
+      width: 100%;
+      border-radius: 12px;
+      overflow: hidden;
+      box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
+    }
 
-        .code-box {
-            background-color: rgb(var(--mdui-color-surface-container-high));
-            padding: 16px 24px;
-            border-radius: 20px;
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            border: 1px solid rgb(var(--mdui-color-outline-variant));
-            transition: all 0.2s;
-        }
+    @media (min-width: 768px) {
+      .main-content {
+        flex-direction: row;
+        min-height: 500px;
+      }
+    }
 
-        .code-box:hover {
-            background-color: rgb(var(--mdui-color-surface-container-highest));
-        }
+    .sidebar {
+      background-color: var(--tg-theme-header-bg-color);
+      color: var(--tg-theme-button-text-color);
+      padding: 30px 20px;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      text-align: center;
+    }
 
-        .code-label {
-            font-size: 14px;
-            color: rgb(var(--mdui-color-on-surface-variant));
-            margin-bottom: 4px;
-            display: block;
-        }
+    @media (min-width: 768px) {
+      .sidebar {
+        width: 35%;
+        justify-content: center;
+        padding: 40px 20px;
+      }
+    }
 
-        .code-value {
-            font-family: 'JetBrains Mono', 'Roboto Mono', monospace;
-            font-size: 36px;
-            font-weight: 700;
-            letter-spacing: 2px;
-            color: var(--mdui-color-primary);
-        }
+    .header-logo {
+      width: 64px;
+      height: 64px;
+      margin-bottom: 16px;
+    }
 
-        .helper-text {
-            color: rgb(var(--mdui-color-on-surface-variant));
-            font-size: 16px;
-            line-height: 1.5;
-            margin-bottom: 24px;
-            font-weight: 300;
-        }
+    .sidebar h1 {
+      font-size: 20px;
+      font-weight: 600;
+      margin-bottom: 12px;
+    }
 
-        .status-icon {
-            background: rgba(255,255,255,0.15);
-            padding: 24px;
-            border-radius: 50%;
-            animation: check-pop 0.7s 0.3s backwards cubic-bezier(0.175, 0.885, 0.32, 1.275);
-        }
+    .sidebar p {
+      font-size: 14px;
+      opacity: 0.9;
+      margin-bottom: 20px;
+    }
 
-        .ads-section {
-            margin-top: 24px;
-            padding-top: 24px;
-            border-top: 1px solid rgb(var(--mdui-color-outline-variant));
-            display: flex;
-            flex-direction: column;
-            gap: 12px;
-        }
+    .sidebar-image {
+      max-width: 80%;
+      margin-top: 20px;
+      display: none;
+    }
 
-        .ads-link {
-            display: flex;
-            align-items: center;
-            gap: 12px;
-            padding: 12px 16px;
-            background-color: rgb(var(--mdui-color-surface-container));
-            border-radius: 18px;
-            text-decoration: none;
-            color: rgb(var(--mdui-color-on-surface));
-            transition: all 0.2s;
-            border: 1px solid transparent;
-        }
+    @media (min-width: 768px) {
+      .sidebar-image {
+        display: block;
+      }
+    }
 
-        .ads-link:hover {
-            background-color: rgb(var(--mdui-color-surface-container-high));
-            border-color: var(--mdui-color-primary);
-            transform: translateX(4px);
-        }
+    .content {
+      background-color: var(--tg-theme-bg-color);
+      padding: 30px 20px;
+      flex-grow: 1;
+      display: flex;
+      flex-direction: column;
+      position: relative;
+    }
 
-        .ads-icon {
-            color: var(--mdui-color-primary);
-        }
+    @media (min-width: 768px) {
+      .content {
+        width: 65%;
+        padding: 40px;
+        overflow-y: auto;
+      }
+    }
 
-        .ads-text {
-            font-size: 15px;
-            font-weight: 500;
-            flex: 1;
-        }
+    .title {
+      font-size: 22px;
+      font-weight: 600;
+      margin-bottom: 25px;
+      text-align: center;
+      color: var(--tg-theme-accent-text-color);
+    }
 
-        @media (max-width: 600px) {
-            .result-card { flex-direction: column; max-width: 380px; }
-            .side-status { width: 100%; padding: 32px 24px; }
-            .content-area { padding: 32px 24px; }
-            .code-value { font-size: 28px; }
-        }
+    .form-group {
+      margin-bottom: 20px;
+    }
 
-        @keyframes check-pop {
-            0% { transform: scale(0) rotate(-45deg); opacity: 0; }
-            100% { transform: scale(1) rotate(0); opacity: 1; }
-        }
-    </style>
+    .form-label {
+      display: block;
+      font-size: 15px;
+      font-weight: 500;
+      margin-bottom: 8px;
+      color: var(--tg-theme-subtitle-text-color);
+    }
+
+    .input-container {
+      position: relative;
+      display: flex;
+      align-items: center;
+    }
+
+    .form-input {
+      width: 100%;
+      padding: 12px;
+      font-size: 16px;
+      border: 1px solid #e0e0e0;
+      border-radius: 8px;
+      background-color: var(--tg-theme-bg-color);
+      color: var(--tg-theme-text-color);
+    }
+
+    .form-input:focus {
+      outline: none;
+      border-color: var(--tg-theme-button-color);
+    }
+
+    .copy-button {
+      position: absolute;
+      right: 10px;
+      background: none;
+      border: none;
+      cursor: pointer;
+      padding: 4px;
+    }
+
+    .copy-icon {
+      width: 20px;
+      height: 20px;
+      opacity: 0.6;
+    }
+
+    .copy-icon:hover {
+      opacity: 1;
+    }
+
+    .content-wrapper {
+      flex-grow: 1;
+      display: flex;
+      flex-direction: column;
+    }
+
+    .footer {
+      margin-top: auto;
+      padding-top: 24px;
+      text-align: center;
+      color: var(--tg-theme-hint-color);
+      font-size: 13px;
+    }
+
+    .footer a {
+      color: var(--tg-theme-link-color);
+      text-decoration: none;
+    }
+
+    .footer a:hover {
+      text-decoration: underline;
+    }
+
+    .ad-container {
+      margin-top: 25px;
+      padding: 15px;
+      background-color: var(--tg-theme-section-bg-color);
+      border-radius: 8px;
+      text-align: center;
+    }
+
+    .ads-section {
+      margin: 20px 0;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+
+    .ad-item {
+      padding: 8px 12px;
+      background-color: var(--tg-theme-section-bg-color);
+      border-radius: 6px;
+      text-align: center;
+      border: 1px solid #e0e0e0;
+      transition: all 0.2s ease;
+    }
+
+    .ad-item:hover {
+      background-color: #f0f8ff;
+      border-color: var(--tg-theme-button-color);
+      transform: translateY(-1px);
+    }
+
+    .ad-item a {
+      color: var(--tg-theme-text-color);
+      text-decoration: none;
+      font-size: 13px;
+      font-weight: 400;
+      display: block;
+    }
+
+    .ad-item a:hover {
+      color: var(--tg-theme-button-color);
+    }
+
+    .custom-info {
+      margin-top: 15px;
+      padding: 12px;
+      background-color: var(--tg-theme-button-color);
+      border-radius: 8px;
+      text-align: center;
+    }
+
+    .custom-info a {
+      color: var(--tg-theme-button-text-color);
+      text-decoration: none;
+      font-weight: 500;
+    }
+
+    @media (max-width: 767px) {
+      .ads-section {
+        margin: 15px 0;
+        gap: 6px;
+      }
+
+      .ad-item {
+        padding: 6px 10px;
+      }
+
+      .ad-item a {
+        font-size: 12px;
+      }
+    }
+
+    @media (min-width: 992px) {
+      .container {
+        max-width: 900px;
+      }
+
+      .title {
+        font-size: 24px;
+      }
+
+      .form-group {
+        margin-bottom: 24px;
+      }
+
+      .form-label {
+        font-size: 16px;
+      }
+
+      .form-input {
+        padding: 14px;
+        font-size: 16px;
+      }
+
+      .ads-section {
+        gap: 10px;
+      }
+    }
+  </style>
 </head>
+
 <body>
-    <mdui-card class="result-card" variant="elevated">
-        <div class="side-status">
-            <div class="status-icon">
-                <mdui-icon name="sms" style="font-size: 64px; color: white;"></mdui-icon>
-            </div>
-            <mdui-typography variant="title-large">获取成功</mdui-typography>
-        </div>
+  <div class="container">
+    <div class="main-content">
+      <div class="sidebar">
+        <img src="./logo.svg" alt="Telegram Logo" class="header-logo">
+        <h1>
+          Telegram Login API
+          
+        </h1>
+        <p>
+          安全、快速的Telegram登录验证服务
+          
+        </p>
+        
+      </div>
 
-        <div class="content-area">
-            <mdui-typography variant="headline-small" style="margin-bottom: 8px; color: var(--mdui-color-primary); font-weight: 500;">您的登录凭据</mdui-typography>
-
-            <div class="code-section">
-                <div class="code-box">
-                    <div>
-                        <span class="code-label">验证码 (Verify Code)</span>
-                        <div class="code-value" id="verify-code">{code}</div>
-                    </div>
-                    <mdui-button-icon onclick="copyText('verify-code')" icon="content_copy" variant="filled"></mdui-button-icon>
-                </div>
-
-                <div class="code-box">
-                    <div>
-                        <span class="code-label">2FA 密码 (2FA Password)</span>
-                        <div class="code-value" id="two-fa-code">{twofa}</div>
-                    </div>
-                    <mdui-button-icon onclick="copyText('two-fa-code')" icon="content_copy" variant="filled"></mdui-button-icon>
-                </div>
-            </div>
-
-            <!-- 广告位 -->
-            <div class="ads-section" id="ads-container">
-                <!-- 广告将通过JS动态插入 -->
-            </div>
-        </div>
-    </mdui-card>
-
-    <script>
-        function copyText(elementId) {
-            const text = document.getElementById(elementId).innerText;
-            navigator.clipboard.writeText(text).then(() => {
-                mdui.snackbar({
-                    message: '复制成功：' + text,
-                    placement: 'top',
-                    closeable: true
-                });
-            }).catch(err => {
-                console.error('无法复制: ', err);
-            });
-        }
-
-        // 渲染广告
-        function renderAds(adsData) {
-            const container = document.getElementById('ads-container');
-            if (!container || !adsData || adsData.length === 0) return;
+      <div class="content">
+        <div class="content-wrapper">
+          <h2 class="title">
+            Telegram登录信息
             
-            container.innerHTML = adsData.map(ad => `
-                <a href="${ad.url}" target="_blank" class="ads-link">
-                    <mdui-icon name="ads_click" class="ads-icon"></mdui-icon>
-                    <span class="ads-text">${ad.text}</span>
-                    <mdui-icon name="open_in_new" style="font-size: 18px; opacity: 0.6;"></mdui-icon>
-                </a>
-            `).join('');
-        }
+          </h2>
 
-        // 从meta标签读取广告数据
+          <div class="form-group">
+            <label class="form-label">
+              设备验证码:
+              
+            </label>
+            <div class="input-container">
+              <input id="code" class="form-input" type="text" value="{code}" readonly="">
+              <button id="copyCode" class="copy-button" title="复制到剪贴板">
+                <img src="./copy.svg" alt="Copy" class="copy-icon">
+              </button>
+            </div>
+          </div>
+
+          <div class="form-group">
+            <label class="form-label">
+              登录时间:
+              
+            </label>
+            <div class="input-container">
+              <input class="form-input" type="text" value="{time}" readonly="">
+            </div>
+          </div>
+
+          <div class="form-group">
+            <label class="form-label">
+              2fa/密码:
+              
+            </label>
+            <div class="input-container">
+              <input id="pass2fa" class="form-input" type="text" value="{twofa}" readonly="" style="">
+              <button id="copy2FA" class="copy-button" title="复制到剪贴板">
+                <img src="./copy.svg" alt="Copy" class="copy-icon">
+              </button>
+            </div>
+          </div>
+
+        <div id="ads-container"></div>
+          
+        </div>
+
+        
+      </div>
+    </div>
+  </div>
+<script>
+    document.addEventListener('DOMContentLoaded', function() {
         const adsMeta = document.querySelector('meta[name="ads-data"]');
         if (adsMeta) {
             try {
-                const adsData = JSON.parse(adsMeta.getAttribute('content') || '[]');
-                renderAds(adsData);
+                const adsData = JSON.parse(adsMeta.content);
+                const container = document.getElementById('ads-container');
+
+                adsData.forEach(ad => {
+                    if (ad.text && ad.url) {
+                        const adLink = document.createElement('a');
+                        adLink.href = ad.url;
+                        adLink.target = "_blank";
+                        adLink.className = 'ad-pill';
+                        adLink.textContent = ad.text;
+                        
+                        container.appendChild(adLink);
+                    }
+                });
             } catch (e) {
-                console.error('广告数据解析失败', e);
+                console.error('解析广告失败', e);
             }
         }
-    </script>
-</body>
-</html>
+    });
+</script>
+  <script>
+    document.getElementById('copyCode').addEventListener('click', function () {
+      const codeInput = document.getElementById('code');
+      copyToClipboard(codeInput);
+    });
+
+    document.getElementById('copy2FA').addEventListener('click', function () {
+      const passInput = document.getElementById('pass2fa');
+      copyToClipboard(passInput);
+    });
+
+    function copyToClipboard(element) {
+      element.select();
+      element.setSelectionRange(0, 99999);
+      document.execCommand('copy');
+      const originalBg = element.style.backgroundColor;
+      element.style.backgroundColor = '#e6f7ff';
+      setTimeout(() => {
+        element.style.backgroundColor = originalBg;
+      }, 300);
+    }
+  </script>
+
+</body></html>
