@@ -136,7 +136,7 @@ async def create_single_passkey(session_file, json_file, out_dir, api_id, api_ha
             
         final_api_id = int(json_config.get('app_id', json_config.get('api_id', api_id)))
         final_api_hash = str(json_config.get('app_hash', json_config.get('api_hash', api_hash)))
-        twofa_pwd = json_config.get('twofa', json_config.get('password', ''))
+        twofa_pwd = json_config.get('twofa', json_config.get('2fa', ''))
 
         official_api = API.TelegramDesktop.Generate()
         official_api.api_id = final_api_id
@@ -216,7 +216,6 @@ async def create_single_passkey(session_file, json_file, out_dir, api_id, api_ha
         if client: await client.disconnect()
 
 async def login_single_passkey(passkey_file, out_dir, api_id, api_hash):
-    """使用Passkey文件执行登录做号"""
     client = None
     try:
         raw_data = passkey_file.read_text(encoding="utf-8")
