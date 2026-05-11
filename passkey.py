@@ -136,7 +136,13 @@ async def create_single_passkey(session_file, json_file, out_dir, api_id, api_ha
             
         final_api_id = int(json_config.get('app_id', json_config.get('api_id', api_id)))
         final_api_hash = str(json_config.get('app_hash', json_config.get('api_hash', api_hash)))
-        twofa_pwd = json_config.get('twofa', json_config.get('2fa', ''))
+        keys_to_check = ['twofa', '2fa', 'password', '2FA', 'twoFA', 'Password']
+        twofa_pwd = ""
+        for key in keys_to_check:
+            val = json_config.get(key)
+            if val: 
+                twofa_pwd = str(val)
+                break
 
         official_api = API.TelegramDesktop.Generate()
         official_api.api_id = final_api_id
