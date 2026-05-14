@@ -137,22 +137,32 @@ async def check_account_restriction(client, session_name):
     try:
         spambot = await client.get_entity(SPAMBOT_USERNAME)
         await client.send_message(spambot, "/start")
-        await asyncio.sleep(3)
+        await asyncio.sleep(2)
         
         async for message in client.iter_messages(spambot, limit=1):
             if message.out:
                 continue
-            text = message.text
+            if message.reply_markup and hasattr(message.reply_markup, 'rows'):
+                button_count = 0
+                for row in message.reply_markup.rows:
+                    button_count += len(row.buttons)
+                
+                logger.info(f"账号 {session_name} 检测到 {button_count} 个按钮")
+                
+                if button_count == 2:
+                    return "unlimited", "无限制账户"
+                elif button_count >= 4:
+                    return "limited", "有限制账户"
+                else:
+                    return "limited", f"检测到 {button_count} 个按钮"
             
-            if ("bird" in text and "free" in text) or \
-               ("Kabar baik, akun Anda tidak dibatasi" in text) or \
-               ("Boas notícias, nenhum limite foi aplicado à sua conta" in text):
+            text = message.text or ""
+            if "no limits" in text.lower() or "tidak dibatasi" in text.lower():
                 return "unlimited", "无限制账户"
-            else:
-                return "limited", "有限制账户"
-        
-        return "unknown", "无法判断"
+                
+        return "unknown", "无法通过键盘判断"
     except Exception as e:
+        logger.error(f"检查 {session_name} 限制失败: {e}")
         return "error", f"检查失败: {str(e)[:50]}"
 
 async def generate_json_for_session(session_file, client, me, api_id, api_hash, official_api):
