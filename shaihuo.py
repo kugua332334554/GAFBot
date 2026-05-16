@@ -6,15 +6,14 @@ import tempfile
 import time
 import random
 import json
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 import logging
 from telegram import InlineKeyboardMarkup
 from dotenv import load_dotenv
 from opentele.tl import TelegramClient
 from opentele.api import API
 from telethon.errors import SessionPasswordNeededError, FloodWaitError
-from telethon.tl.functions.account import GetPrivacyRequest
-from telethon.tl.types import InputPrivacyKeyPhoneNumber
+from telethon.tl.functions.help import GetAppConfigRequest
 
 logger = logging.getLogger(__name__)
 
@@ -95,11 +94,18 @@ def create_proxy_dict(proxy):
         'rdns': True
     }
 
+def timestamp_to_utc8_str(ts):
+    if not ts:
+        return None
+    dt_utc = datetime.fromtimestamp(ts, tz=timezone.utc)
+    dt_utc8 = dt_utc + timedelta(hours=8)
+    return dt_utc8.strftime("%Y-%m-%d %H:%M:%S")
+
 async def generate_json_for_session(session_file, client, me, api_id, api_hash, official_api):
     json_path = session_file.replace('.session', '.json')
     phone = me.phone if me.phone else os.path.basename(session_file).replace('.session', '')
     reg_time = datetime.now().strftime("%Y-%m-%d")
-    
+
     device_model = getattr(official_api, 'device_model', 'Desktop')
     system_version = getattr(official_api, 'system_version', '')
     app_version = getattr(official_api, 'app_version', '')
@@ -107,7 +113,7 @@ async def generate_json_for_session(session_file, client, me, api_id, api_hash, 
     lang_pack = getattr(official_api, 'lang_pack', '')
     lang_code = getattr(official_api, 'lang_code', 'en')
     pid = getattr(official_api, 'pid', random.randint(100000, 999999))
-    
+
     json_data = {
         "api_id": api_id,
         "api_hash": api_hash,
@@ -138,7 +144,7 @@ async def generate_json_for_session(session_file, client, me, api_id, api_hash, 
         "premium": getattr(me, 'premium', False),
         "reg_time": reg_time
     }
-    
+
     try:
         os.makedirs(os.path.dirname(json_path), exist_ok=True)
         with open(json_path, 'w', encoding='utf-8') as f:
@@ -154,7 +160,7 @@ async def check_session_alive(session_file, json_file, api_id, api_hash):
     proxy_to_use = None
     json_config = {}
     final_json_file = json_file if json_file and os.path.exists(json_file) else None
-    
+
     if final_json_file:
         try:
             with open(final_json_file, 'r', encoding='utf-8') as f:
@@ -213,16 +219,17 @@ async def check_session_alive(session_file, json_file, api_id, api_hash):
         client = TelegramClient(
             session_file,
             api=official_api,
-            proxy=proxy_to_use
+            proxy=proxy_to_use,
+            receive_updates=False
         )
 
         await client.connect()
         if not await client.is_user_authorized():
-            return False, "验证失效", final_json_file
+            return 'dead', "未授权", final_json_file, None
 
         me = await client.get_me()
         if not me:
-            return False, "无法获取用户信息", final_json_file
+            return 'dead', "无法获取用户信息", final_json_file, None
 
         if not final_json_file:
             generated_path = await generate_json_for_session(
@@ -232,25 +239,42 @@ async def check_session_alive(session_file, json_file, api_id, api_hash):
                 final_json_file = generated_path
 
         try:
-            await client(GetPrivacyRequest(InputPrivacyKeyPhoneNumber()))
-            return True, "存活", final_json_file
-        except Exception as e:
-            error_str = str(e).lower()
-            if any(x in error_str for x in [
-                'frozen', 'peer_id_invalid', 'invite', 'forbidden', 'access',
-                'privacy_key_invalid', 'user_privacy_restricted'
-            ]):
-                logger.info(f"账号 {os.path.basename(session_file)} 检测到冻结特征: {type(e).__name__}")
-                return True, "冻结", final_json_file
+            app_config = await client(GetAppConfigRequest(hash=0))
+            config_json = json.loads(app_config.to_json())
+            freeze_info = None
+            freeze_since = None
+            freeze_until = None
+
+            for item in config_json.get('config', {}).get('value', []):
+                key = item.get('key')
+                if key == 'freeze_since_date':
+                    val = item.get('value', {})
+                    if val.get('_') == 'JsonNumber':
+                        freeze_since = val.get('value')
+                elif key == 'freeze_until_date':
+                    val = item.get('value', {})
+                    if val.get('_') == 'JsonNumber':
+                        freeze_until = val.get('value')
+
+            if freeze_since is not None and freeze_until is not None and freeze_since > 0 and freeze_until > 0:
+                freeze_info = {
+                    'since': timestamp_to_utc8_str(freeze_since),
+                    'until': timestamp_to_utc8_str(freeze_until)
+                }
+                return 'frozen', "账号被冻结", final_json_file, freeze_info
             else:
-                return False, f"错误:{str(e)[:20]}", final_json_file
+                return 'alive', "存活", final_json_file, None
+
+        except Exception as e:
+            logger.error(f"获取 AppConfig 失败: {e}")
+            return 'dead', f"配置获取错误: {str(e)[:20]}", final_json_file, None
 
     except SessionPasswordNeededError:
-        return False, "2FA验证", final_json_file
+        return 'dead', "2FA验证", final_json_file, None
     except FloodWaitError as e:
-        return False, f"等待{e.seconds}秒", final_json_file
+        return 'dead', f"等待{e.seconds}秒", final_json_file, None
     except Exception as e:
-        return False, f"错误:{str(e)[:20]}", final_json_file
+        return 'dead', f"错误:{str(e)[:20]}", final_json_file, None
     finally:
         if client:
             await client.disconnect()
@@ -441,27 +465,47 @@ async def _process_shaihuo_internal(update, context, zip_path, user_id, api_id, 
                 except:
                     pass
 
-            is_alive, reason, json_file = await check_session_alive(session_file, json_file, api_id, api_hash)
+            status, reason, final_json_file, freeze_info = await check_session_alive(session_file, json_file, api_id, api_hash)
 
-            if is_alive and reason == "存活":
-                target_dir = alive_dir
+            phone = session_name
+            if final_json_file and os.path.exists(final_json_file):
+                try:
+                    with open(final_json_file, 'r', encoding='utf-8') as f:
+                        jdata = json.load(f)
+                        phone = jdata.get('phone', session_name)
+                except:
+                    pass
+
+            if status == 'alive':
+                target_dir = os.path.join(alive_dir, phone)
                 alive_count += 1
-            elif is_alive and reason == "冻结":
-                target_dir = frozen_dir
+            elif status == 'frozen':
+                target_dir = os.path.join(frozen_dir, phone)
                 frozen_count += 1
             else:
-                target_dir = dead_dir
+                target_dir = os.path.join(dead_dir, phone)
                 dead_count += 1
+
+            os.makedirs(target_dir, exist_ok=True)
 
             try:
                 shutil.copy2(session_file, os.path.join(target_dir, os.path.basename(session_file)))
             except:
                 pass
-            if json_file and os.path.exists(json_file):
+            if final_json_file and os.path.exists(final_json_file):
                 try:
-                    shutil.copy2(json_file, os.path.join(target_dir, os.path.basename(json_file)))
+                    shutil.copy2(final_json_file, os.path.join(target_dir, os.path.basename(final_json_file)))
                 except:
                     pass
+
+            if status == 'frozen' and freeze_info:
+                frozen_txt_path = os.path.join(target_dir, "frozen.txt")
+                try:
+                    with open(frozen_txt_path, 'w', encoding='utf-8') as f:
+                        f.write(f"冻结开始时间: {freeze_info['since']}\n")
+                        f.write(f"冻结结束时间: {freeze_info['until']}\n")
+                except Exception as e:
+                    logger.error(f"写入 frozen.txt 失败: {e}")
 
             await asyncio.sleep(0.5)
 
@@ -471,8 +515,8 @@ async def _process_shaihuo_internal(update, context, zip_path, user_id, api_id, 
                 for root, dirs, files in os.walk(alive_dir):
                     for file in files:
                         file_path = os.path.join(root, file)
-                        arcname = os.path.relpath(file_path, alive_dir)
-                        zipf.write(file_path, arcname)
+                        rel_path = os.path.relpath(file_path, alive_dir)
+                        zipf.write(file_path, rel_path)
 
         frozen_zip = os.path.join(temp_dir, "frozen.zip")
         if frozen_count > 0:
@@ -480,8 +524,8 @@ async def _process_shaihuo_internal(update, context, zip_path, user_id, api_id, 
                 for root, dirs, files in os.walk(frozen_dir):
                     for file in files:
                         file_path = os.path.join(root, file)
-                        arcname = os.path.relpath(file_path, frozen_dir)
-                        zipf.write(file_path, arcname)
+                        rel_path = os.path.relpath(file_path, frozen_dir)
+                        zipf.write(file_path, rel_path)
 
         dead_zip = os.path.join(temp_dir, "dead.zip")
         if dead_count > 0:
@@ -489,8 +533,8 @@ async def _process_shaihuo_internal(update, context, zip_path, user_id, api_id, 
                 for root, dirs, files in os.walk(dead_dir):
                     for file in files:
                         file_path = os.path.join(root, file)
-                        arcname = os.path.relpath(file_path, dead_dir)
-                        zipf.write(file_path, arcname)
+                        rel_path = os.path.relpath(file_path, dead_dir)
+                        zipf.write(file_path, rel_path)
 
         result_text = f"""<tg-emoji emoji-id="5845955401916355857">✅</tg-emoji> <b>筛活完成</b>
 
