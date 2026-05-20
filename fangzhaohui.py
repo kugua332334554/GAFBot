@@ -17,6 +17,7 @@ from telegram.ext import ContextTypes
 from dotenv import load_dotenv
 from opentele.tl import TelegramClient as OpenteleClient
 from opentele.api import API
+from opentele.td import TDesktop
 
 load_dotenv()
 logger = logging.getLogger(__name__)
@@ -113,6 +114,129 @@ def create_back_button():
         callback_data="back_to_main"
     ).to_dict() | {"icon_custom_emoji_id": BACK_BUTTON_EMOJI_ID}
 
+def generate_non_linux_api():
+    max_attempts = 100
+    attempt = 0
+    while attempt < max_attempts:
+        api = API.TelegramDesktop.Generate()
+        if 'linux' not in api.device_model.lower():
+            return api
+        attempt += 1
+    api = API.TelegramDesktop.Generate()
+    api.device_model = "Desktop"
+    return api
+
+def find_tdata_folders(root_dir):
+    tdata_dirs = set()
+    for root, dirs, files in os.walk(root_dir):
+        if os.path.basename(root) == 'tdata':
+            if any(f in files for f in ['key_datas', 'map']):
+                tdata_dirs.add(root)
+        elif 'tdata' in dirs:
+            potential = os.path.join(root, 'tdata')
+            if os.path.exists(potential):
+                sub_files = os.listdir(potential)
+                if any(f in sub_files for f in ['key_datas', 'map']):
+                    tdata_dirs.add(potential)
+    return list(tdata_dirs)
+
+def read_2fa_from_folder(folder_path: str):
+    for file in os.listdir(folder_path):
+        if file.lower() in ['2fa.txt', '2fa', 'password.txt']:
+            try:
+                with open(os.path.join(folder_path, file), 'r', encoding='utf-8') as f:
+                    return f.read().strip()
+            except:
+                pass
+    return None
+
+async def convert_tdata_to_session_with_proxy(tdata_dir, output_dir, twofa, proxy_dict):
+    API_ID = int(os.getenv("TELEGRAM_APP_ID", "2040"))
+    API_HASH = os.getenv("TELEGRAM_APP_HASH", "b18441a1ff607e10a989891a5462e627")
+    
+    try:
+        tdesk = TDesktop(tdata_dir)
+        if not tdesk.isLoaded():
+            return False, None, None, None, "tdata 文件无法加载"
+        
+        from opentele.api import UseCurrentSession
+        client = await tdesk.ToTelethon(
+            session=os.path.join(output_dir, "temp.session"),
+            flag=UseCurrentSession,
+            proxy=proxy_dict
+        )
+        
+        await client.connect()
+        if not await client.is_user_authorized():
+            await client.disconnect()
+            return False, None, None, None, "会话未授权"
+        
+        me = await client.get_me()
+        if not me:
+            await client.disconnect()
+            return False, None, None, None, "无法获取用户信息"
+        
+        phone = me.phone
+        if not phone:
+            await client.disconnect()
+            return False, None, None, None, "无法获取手机号"
+        
+        temp_session = os.path.join(output_dir, "temp.session")
+        final_session = os.path.join(output_dir, f"{phone}.session")
+        if os.path.exists(temp_session):
+            shutil.move(temp_session, final_session)
+        
+        random_api = generate_non_linux_api()
+        try:
+            if hasattr(me, 'date') and me.date:
+                reg_time = datetime.fromtimestamp(me.date.timestamp()).strftime("%Y-%m-%d")
+            else:
+                reg_time = datetime.now().strftime("%Y-%m-%d")
+        except Exception:
+            reg_time = datetime.now().strftime("%Y-%m-%d")
+        
+        json_data = {
+            "api_id": API_ID,
+            "api_hash": API_HASH,
+            "device_model": random_api.device_model,
+            "system_version": random_api.system_version,
+            "app_version": random_api.app_version,
+            "system_lang_code": random_api.system_lang_code,
+            "lang_pack": random_api.lang_pack,
+            "lang_code": random_api.lang_code,
+            "pid": random_api.pid,
+            "user_id": me.id,
+            "phone": phone,
+            "twofa": twofa if twofa else "",
+            "password": twofa if twofa else "",
+            "app_id": API_ID,
+            "app_hash": API_HASH,
+            "session_file": phone,
+            "device": random_api.device_model,
+            "username": me.username or "",
+            "sex": None,
+            "avatar": "img/default.png",
+            "package_id": "",
+            "installer": "",
+            "ipv6": False,
+            "SDK": random_api.system_version,
+            "sdk": random_api.system_version,
+            "system_lang_pack": random_api.system_lang_code,
+            "premium": getattr(me, 'premium', False),
+            "reg_time": reg_time
+        }
+        
+        json_path = os.path.join(output_dir, f"{phone}.json")
+        with open(json_path, 'w', encoding='utf-8') as f:
+            json.dump(json_data, f, ensure_ascii=False, indent=2)
+        
+        await client.disconnect()
+        return True, phone, final_session, json_path, None
+        
+    except Exception as e:
+        logger.error(f"转换 tdata 失败 {tdata_dir}: {e}")
+        return False, None, None, None, str(e)
+
 async def show_prevent_recovery(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     user_id = str(query.from_user.id)
@@ -181,13 +305,52 @@ async def handle_recovery_document(update: Update, context: ContextTypes.DEFAULT
                     session_files.append(session_path)
         
         if not session_files:
-            await update.message.reply_text(
-                "<tg-emoji emoji-id='5778527486270770928'>❌</tg-emoji> 未找到任何 .session 文件",
-                parse_mode='HTML',
-                reply_markup=InlineKeyboardMarkup([[create_back_button()]])
+            tdata_dirs = find_tdata_folders(extract_dir)
+            if not tdata_dirs:
+                await update.message.reply_text(
+                    "<tg-emoji emoji-id='5778527486270770928'>❌</tg-emoji> 未找到session或tdata文件夹",
+                    parse_mode='HTML',
+                    reply_markup=InlineKeyboardMarkup([[create_back_button()]])
+                )
+                user_recovery_states.pop(user_id, None)
+                return
+            
+            await status_msg.edit_text(
+                f"<tg-emoji emoji-id='5839200986022812209'>🔄</tg-emoji> 检测到 {len(tdata_dirs)} 个tdata，正在转换...",
+                parse_mode='HTML'
             )
-            user_recovery_states.pop(user_id, None)
-            return
+            
+            convert_dir = os.path.join(extract_dir, "converted_sessions")
+            os.makedirs(convert_dir, exist_ok=True)
+            
+            for idx, tdata_dir in enumerate(tdata_dirs, 1):
+                parent_dir = os.path.dirname(tdata_dir)
+                twofa = read_2fa_from_folder(parent_dir)
+                proxy = get_random_proxy()
+                proxy_dict = create_proxy_dict(proxy) if proxy else None
+                
+                account_out = os.path.join(convert_dir, f"acc_{idx}")
+                os.makedirs(account_out, exist_ok=True)
+                
+                success, phone, sess_path, json_path, err = await convert_tdata_to_session_with_proxy(
+                    tdata_dir, account_out, twofa, proxy_dict
+                )
+                
+                if success and sess_path and json_path:
+                    session_files.append(sess_path)
+                else:
+                    logger.error(f"转换失败 {tdata_dir}: {err}")
+                
+                await asyncio.sleep(0.2)
+            
+            if not session_files:
+                await update.message.reply_text(
+                    "<tg-emoji emoji-id='5778527486270770928'>❌</tg-emoji> 所有tdata转换失败，无法继续",
+                    parse_mode='HTML',
+                    reply_markup=InlineKeyboardMarkup([[create_back_button()]])
+                )
+                user_recovery_states.pop(user_id, None)
+                return
         
         user_recovery_states[user_id] = {
             "state": "waiting_2fa",
@@ -343,9 +506,17 @@ async def _process_recovery_internal(update, context, user_id, session_files, ex
         
         session_basename = os.path.basename(session_path)
         session_name = os.path.splitext(session_basename)[0]
-        json_path = os.path.join(os.path.dirname(session_path), f"{session_name}.json")
-        if not os.path.exists(json_path):
-            json_path = None
+        
+        json_path = None
+        base_dir = os.path.dirname(session_path)
+        possible_json = os.path.join(base_dir, f"{session_name}.json")
+        if os.path.exists(possible_json):
+            json_path = possible_json
+        else:
+            for root, dirs, files in os.walk(extract_dir):
+                if f"{session_name}.json" in files:
+                    json_path = os.path.join(root, f"{session_name}.json")
+                    break
         
         try:
             result = await process_single_account(session_path, json_path, two_fa, user_id, session_name)
