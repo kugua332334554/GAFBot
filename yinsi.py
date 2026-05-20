@@ -9,6 +9,7 @@ import random
 from datetime import datetime
 from opentele.tl import TelegramClient
 from opentele.api import API
+from opentele.td import TDesktop
 from telethon.errors import SessionPasswordNeededError, FloodWaitError
 from telethon.tl.functions.account import SetPrivacyRequest
 from telethon.tl.types import InputPrivacyKeyStatusTimestamp, InputPrivacyKeyPhoneNumber, InputPrivacyValueAllowAll, InputPrivacyValueDisallowAll, InputPrivacyValueAllowContacts, InputPrivacyValueDisallowContacts, InputPrivacyKeyChatInvite, InputPrivacyKeyProfilePhoto
@@ -282,7 +283,7 @@ async def handle_privacy_confirm_upload(update: Update, context: ContextTypes.DE
 
 {chr(10).join(settings_text)}
 
-<tg-emoji emoji-id="5877540355187937244">✏️</tg-emoji> 请上传包含session的ZIP文件""",
+<tg-emoji emoji-id="5877540355187937244">✏️</tg-emoji> 请上传包含session或tdata的ZIP文件""",
         parse_mode='HTML',
         reply_markup=reply_markup
     )
@@ -298,72 +299,128 @@ async def handle_privacy_reset_all(update: Update, context: ContextTypes.DEFAULT
     
     await show_privacy_config(update, context)
 
-async def handle_privacy_document(update: Update, context: ContextTypes.DEFAULT_TYPE, user_id: str):
-    document = update.message.document
-    
-    if not document.file_name.endswith('.zip'):
-        keyboard = [[create_back_button()]]
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        
-        await update.message.reply_text(
-            "<tg-emoji emoji-id='5778527486270770928'>❌</tg-emoji> 请上传ZIP格式的压缩包",
-            parse_mode='HTML',
-            reply_markup=reply_markup
-        )
-        user_privacy_states.pop(user_id, None)
-        return
-    
-    privacy_settings_data = user_privacy_states.get(user_id, {})
-    if not privacy_settings_data.get("waiting_zip"):
-        keyboard = [[create_back_button()]]
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        
-        await update.message.reply_text(
-            "<tg-emoji emoji-id='5778527486270770928'>❌</tg-emoji> 请先设置隐私选项",
-            parse_mode='HTML',
-            reply_markup=reply_markup
-        )
-        return
-    
-    status_msg = await update.message.reply_text(
-        "<tg-emoji emoji-id='5443127283898405358'>📥</tg-emoji> 正在下载文件...",
-        parse_mode='HTML'
-    )
+def generate_non_linux_api():
+    max_attempts = 100
+    attempt = 0
+    while attempt < max_attempts:
+        api = API.TelegramDesktop.Generate()
+        if 'linux' not in api.device_model.lower():
+            return api
+        attempt += 1
+    api = API.TelegramDesktop.Generate()
+    api.device_model = "Desktop"
+    return api
+
+def find_tdata_folders(root_dir):
+    tdata_dirs = set()
+    for root, dirs, files in os.walk(root_dir):
+        if os.path.basename(root) == 'tdata':
+            if any(f in files for f in ['key_datas', 'map']):
+                tdata_dirs.add(root)
+        elif 'tdata' in dirs:
+            potential = os.path.join(root, 'tdata')
+            if os.path.exists(potential):
+                sub_files = os.listdir(potential)
+                if any(f in sub_files for f in ['key_datas', 'map']):
+                    tdata_dirs.add(potential)
+    return list(tdata_dirs)
+
+def read_2fa_from_folder(folder_path: str):
+    for file in os.listdir(folder_path):
+        if file.lower() in ['2fa.txt', '2fa', 'password.txt']:
+            try:
+                with open(os.path.join(folder_path, file), 'r', encoding='utf-8') as f:
+                    return f.read().strip()
+            except:
+                pass
+    return None
+
+async def convert_tdata_to_session_with_proxy(tdata_dir, output_dir, twofa, proxy_dict):
+    API_ID = int(os.getenv("TELEGRAM_APP_ID", "2040"))
+    API_HASH = os.getenv("TELEGRAM_APP_HASH", "b18441a1ff607e10a989891a5462e627")
     
     try:
-        file = await context.bot.get_file(document.file_id)
-        zip_path = f"downloads/privacy_{user_id}_{int(time.time())}.zip"
-        os.makedirs("downloads", exist_ok=True)
-        await file.download_to_drive(zip_path)
+        tdesk = TDesktop(tdata_dir)
+        if not tdesk.isLoaded():
+            return False, None, None, None, "tdata 文件无法加载"
         
-        await status_msg.edit_text(
-            "<tg-emoji emoji-id='5839200986022812209'>🔍</tg-emoji> 开始处理隐私配置任务...",
-            parse_mode='HTML'
+        from opentele.api import UseCurrentSession
+        client = await tdesk.ToTelethon(
+            session=os.path.join(output_dir, "temp.session"),
+            flag=UseCurrentSession,
+            proxy=proxy_dict
         )
         
-        await process_privacy(update, context, zip_path, user_id, privacy_settings_data)
+        await client.connect()
+        if not await client.is_user_authorized():
+            await client.disconnect()
+            return False, None, None, None, "会话未授权"
         
+        me = await client.get_me()
+        if not me:
+            await client.disconnect()
+            return False, None, None, None, "无法获取用户信息"
+        
+        phone = me.phone
+        if not phone:
+            await client.disconnect()
+            return False, None, None, None, "无法获取手机号"
+        
+        temp_session = os.path.join(output_dir, "temp.session")
+        final_session = os.path.join(output_dir, f"{phone}.session")
+        if os.path.exists(temp_session):
+            shutil.move(temp_session, final_session)
+        
+        random_api = generate_non_linux_api()
         try:
-            os.remove(zip_path)
-        except:
-            pass
+            if hasattr(me, 'date') and me.date:
+                reg_time = datetime.fromtimestamp(me.date.timestamp()).strftime("%Y-%m-%d")
+            else:
+                reg_time = datetime.now().strftime("%Y-%m-%d")
+        except Exception:
+            reg_time = datetime.now().strftime("%Y-%m-%d")
+        
+        json_data = {
+            "api_id": API_ID,
+            "api_hash": API_HASH,
+            "device_model": random_api.device_model,
+            "system_version": random_api.system_version,
+            "app_version": random_api.app_version,
+            "system_lang_code": random_api.system_lang_code,
+            "lang_pack": random_api.lang_pack,
+            "lang_code": random_api.lang_code,
+            "pid": random_api.pid,
+            "user_id": me.id,
+            "phone": phone,
+            "twofa": twofa if twofa else "",
+            "password": twofa if twofa else "",
+            "app_id": API_ID,
+            "app_hash": API_HASH,
+            "session_file": phone,
+            "device": random_api.device_model,
+            "username": me.username or "",
+            "sex": None,
+            "avatar": "img/default.png",
+            "package_id": "",
+            "installer": "",
+            "ipv6": False,
+            "SDK": random_api.system_version,
+            "sdk": random_api.system_version,
+            "system_lang_pack": random_api.system_lang_code,
+            "premium": getattr(me, 'premium', False),
+            "reg_time": reg_time
+        }
+        
+        json_path = os.path.join(output_dir, f"{phone}.json")
+        with open(json_path, 'w', encoding='utf-8') as f:
+            json.dump(json_data, f, ensure_ascii=False, indent=2)
+        
+        await client.disconnect()
+        return True, phone, final_session, json_path, None
         
     except Exception as e:
-        logger.error(f"处理文件失败: {e}")
-        keyboard = [[create_back_button()]]
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        
-        await update.message.reply_text(
-            f"<tg-emoji emoji-id='5778527486270770928'>❌</tg-emoji> 处理失败: {str(e)}",
-            parse_mode='HTML',
-            reply_markup=reply_markup
-        )
-    finally:
-        user_privacy_states.pop(user_id, None)
-        try:
-            await status_msg.delete()
-        except:
-            pass
+        logger.error(f"转换 tdata 失败 {tdata_dir}: {e}")
+        return False, None, None, None, str(e)
 
 async def generate_json_for_session(session_file, client, me, api_id, api_hash, official_api):
     json_path = session_file.replace('.session', '.json')
@@ -441,13 +498,14 @@ async def apply_privacy_settings(client, settings):
     except Exception as e:
         return False, f"设置失败: {str(e)[:50]}"
 
-async def check_session_privacy(session_file, json_file, api_id, api_hash, privacy_settings_data):
+async def check_session_privacy(session_file, json_file, api_id, api_hash, privacy_settings_data, tdata_dir=None):
     client = None
     result = {
         "session": os.path.basename(session_file),
         "status": "unknown",
         "message": "",
         "json_path": None,
+        "tdata_dir": tdata_dir
     }
     json_config = {}
     final_json_file = json_file if json_file and os.path.exists(json_file) else None
@@ -614,6 +672,73 @@ async def process_privacy(update, context, zip_path, user_id, privacy_settings_d
             reply_markup=reply_markup
         )
 
+async def handle_privacy_document(update: Update, context: ContextTypes.DEFAULT_TYPE, user_id: str):
+    document = update.message.document
+    
+    if not document.file_name.endswith('.zip'):
+        keyboard = [[create_back_button()]]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await update.message.reply_text(
+            "<tg-emoji emoji-id='5778527486270770928'>❌</tg-emoji> 请上传ZIP格式的压缩包",
+            parse_mode='HTML',
+            reply_markup=reply_markup
+        )
+        user_privacy_states.pop(user_id, None)
+        return
+    
+    privacy_settings_data = user_privacy_states.get(user_id, {})
+    if not privacy_settings_data.get("waiting_zip"):
+        keyboard = [[create_back_button()]]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await update.message.reply_text(
+            "<tg-emoji emoji-id='5778527486270770928'>❌</tg-emoji> 请先设置隐私选项",
+            parse_mode='HTML',
+            reply_markup=reply_markup
+        )
+        return
+    
+    status_msg = await update.message.reply_text(
+        "<tg-emoji emoji-id='5443127283898405358'>📥</tg-emoji> 正在下载文件...",
+        parse_mode='HTML'
+    )
+    
+    try:
+        file = await context.bot.get_file(document.file_id)
+        zip_path = f"downloads/privacy_{user_id}_{int(time.time())}.zip"
+        os.makedirs("downloads", exist_ok=True)
+        await file.download_to_drive(zip_path)
+        
+        await status_msg.edit_text(
+            "<tg-emoji emoji-id='5839200986022812209'>🔍</tg-emoji> 开始处理隐私配置任务...",
+            parse_mode='HTML'
+        )
+        
+        await process_privacy(update, context, zip_path, user_id, privacy_settings_data)
+        
+        try:
+            os.remove(zip_path)
+        except:
+            pass
+        
+    except Exception as e:
+        logger.error(f"处理文件失败: {e}")
+        keyboard = [[create_back_button()]]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await update.message.reply_text(
+            f"<tg-emoji emoji-id='5778527486270770928'>❌</tg-emoji> 处理失败: {str(e)}",
+            parse_mode='HTML',
+            reply_markup=reply_markup
+        )
+    finally:
+        user_privacy_states.pop(user_id, None)
+        try:
+            await status_msg.delete()
+        except:
+            pass
+
 async def _process_privacy_internal(update, context, zip_path, user_id, api_id, api_hash, admins, privacy_settings_data):
     with tempfile.TemporaryDirectory() as temp_dir:
         extract_dir = os.path.join(temp_dir, "extracted")
@@ -642,26 +767,95 @@ async def _process_privacy_internal(update, context, zip_path, user_id, api_id, 
         for root, dirs, files in os.walk(extract_dir):
             for file in files:
                 if file.endswith('.session'):
-                    session_path = os.path.join(root, file)
-                    session_files.append(session_path)
+                    session_files.append(os.path.join(root, file))
         
-        if not session_files:
-            keyboard = [[create_back_button()]]
-            reply_markup = InlineKeyboardMarkup(keyboard)
+        accounts = []
+        if session_files:
+            for sess in session_files:
+                session_name = os.path.splitext(os.path.basename(sess))[0]
+                json_file = os.path.join(os.path.dirname(sess), f"{session_name}.json")
+                if not os.path.exists(json_file):
+                    json_file = None
+                accounts.append((session_name, sess, json_file, None))
+        else:
+            tdata_dirs = find_tdata_folders(extract_dir)
+            if not tdata_dirs:
+                keyboard = [[create_back_button()]]
+                reply_markup = InlineKeyboardMarkup(keyboard)
+                
+                await context.bot.send_message(
+                    chat_id=update.effective_chat.id,
+                    text="<tg-emoji emoji-id='5778527486270770928'>❌</tg-emoji> 未找到session或tdata文件夹",
+                    parse_mode='HTML',
+                    reply_markup=reply_markup
+                )
+                return
             
-            await context.bot.send_message(
+            status_msg = await context.bot.send_message(
                 chat_id=update.effective_chat.id,
-                text="<tg-emoji emoji-id='5778527486270770928'>❌</tg-emoji> 未找到session文件",
-                parse_mode='HTML',
-                reply_markup=reply_markup
+                text=f"""<tg-emoji emoji-id="5839200986022812209">🔄</tg-emoji> <b>检测到tdata，正在转换为session...</b>
+
+找到 <b>{len(tdata_dirs)}</b> 个tdata文件夹
+请稍候...""",
+                parse_mode='HTML'
             )
-            return
+            
+            convert_temp_dir = os.path.join(temp_dir, "converted_sessions")
+            os.makedirs(convert_temp_dir, exist_ok=True)
+            
+            for i, tdata_dir in enumerate(tdata_dirs, 1):
+                parent_dir = os.path.dirname(tdata_dir)
+                twofa = read_2fa_from_folder(parent_dir)
+                proxy = get_random_proxy()
+                proxy_dict = create_proxy_dict(proxy) if proxy else None
+                
+                account_out = os.path.join(convert_temp_dir, f"acc_{i}")
+                os.makedirs(account_out, exist_ok=True)
+                
+                success, phone, sess_path, json_path, err = await convert_tdata_to_session_with_proxy(
+                    tdata_dir, account_out, twofa, proxy_dict
+                )
+                
+                if success and sess_path and json_path:
+                    accounts.append((phone, sess_path, json_path, tdata_dir))
+                else:
+                    logger.error(f"转换失败 {tdata_dir}: {err}")
+                
+                if i % 3 == 0 or i == len(tdata_dirs):
+                    try:
+                        await status_msg.edit_text(
+                            text=f"""<tg-emoji emoji-id="5839200986022812209">🔄</tg-emoji> <b>tdata转换进度</b>
+
+进度: {i}/{len(tdata_dirs)}
+成功: {len(accounts)}""",
+                            parse_mode='HTML'
+                        )
+                    except:
+                        pass
+                await asyncio.sleep(0.2)
+            
+            try:
+                await status_msg.delete()
+            except:
+                pass
+            
+            if not accounts:
+                keyboard = [[create_back_button()]]
+                reply_markup = InlineKeyboardMarkup(keyboard)
+                
+                await context.bot.send_message(
+                    chat_id=update.effective_chat.id,
+                    text="<tg-emoji emoji-id='5778527486270770928'>❌</tg-emoji> 所有tdata转换失败，无法继续",
+                    parse_mode='HTML',
+                    reply_markup=reply_markup
+                )
+                return
         
         status_msg = await context.bot.send_message(
             chat_id=update.effective_chat.id,
             text=f"""<tg-emoji emoji-id="5839200986022812209">🔄</tg-emoji> <b>隐私配置进行中</b>
 
-找到 <b>{len(session_files)}</b> 个session文件
+找到 <b>{len(accounts)}</b> 个账号
 <tg-emoji emoji-id="5775887550262546277">🔄</tg-emoji>正在处理，请稍候...""",
             parse_mode='HTML'
         )
@@ -674,20 +868,14 @@ async def _process_privacy_internal(update, context, zip_path, user_id, api_id, 
         
         success_count = 0
         failed_count = 0
-        results = []
         
-        for i, session_file in enumerate(session_files, 1):
-            session_name = os.path.splitext(os.path.basename(session_file))[0]
-            json_file = os.path.join(os.path.dirname(session_file), f"{session_name}.json")
-            if not os.path.exists(json_file):
-                json_file = None
-            
-            if i % 3 == 0 or i == len(session_files):
+        for i, (phone, session_file, json_file, tdata_dir) in enumerate(accounts, 1):
+            if i % 3 == 0 or i == len(accounts):
                 try:
                     await status_msg.edit_text(
                         text=f"""<tg-emoji emoji-id="5839200986022812209">🔄</tg-emoji> <b>隐私配置进行中</b>
 
-进度: {i}/{len(session_files)}
+进度: {i}/{len(accounts)}
 <tg-emoji emoji-id="5920052658743283381">✅</tg-emoji>成功: {success_count} | <tg-emoji emoji-id="5922712343011135025">❌</tg-emoji>失败: {failed_count}""",
                         parse_mode='HTML'
                     )
@@ -695,9 +883,8 @@ async def _process_privacy_internal(update, context, zip_path, user_id, api_id, 
                     pass
             
             result = await check_session_privacy(
-                session_file, json_file, api_id, api_hash, privacy_settings_data
+                session_file, json_file, api_id, api_hash, privacy_settings_data, tdata_dir
             )
-            results.append(result)
             
             if result["status"] == "success":
                 target_dir = success_dir
@@ -706,15 +893,20 @@ async def _process_privacy_internal(update, context, zip_path, user_id, api_id, 
                 target_dir = failed_dir
                 failed_count += 1
             
-            try:
-                shutil.copy2(session_file, os.path.join(target_dir, os.path.basename(session_file)))
-            except:
-                pass
+            account_folder = os.path.join(target_dir, phone)
+            os.makedirs(account_folder, exist_ok=True)
+            
+            if tdata_dir and os.path.exists(tdata_dir):
+                tdata_target = os.path.join(account_folder, "tdata")
+                shutil.copytree(tdata_dir, tdata_target, dirs_exist_ok=True)
+            
+            if session_file and os.path.exists(session_file):
+                shutil.copy2(session_file, os.path.join(account_folder, os.path.basename(session_file)))
             
             json_path_to_copy = result.get("json_path") or json_file
             if json_path_to_copy and os.path.exists(json_path_to_copy):
                 try:
-                    shutil.copy2(json_path_to_copy, os.path.join(target_dir, os.path.basename(json_path_to_copy)))
+                    shutil.copy2(json_path_to_copy, os.path.join(account_folder, os.path.basename(json_path_to_copy)))
                 except:
                     pass
             
@@ -754,7 +946,7 @@ async def _process_privacy_internal(update, context, zip_path, user_id, api_id, 
 {chr(10).join(settings_text) if settings_text else "• 无设置变更"}
 
 <tg-emoji emoji-id="5931472654660800739">📊</tg-emoji> 统计结果:
-• <tg-emoji emoji-id="5886412370347036129">👤</tg-emoji> 总账号: <b>{len(session_files)}</b>
+• <tg-emoji emoji-id="5886412370347036129">👤</tg-emoji> 总账号: <b>{len(accounts)}</b>
 • <tg-emoji emoji-id="5920052658743283381">✅</tg-emoji> 成功: <b>{success_count}</b>
 • <tg-emoji emoji-id="5922712343011135025">❌</tg-emoji> 失败: <b>{failed_count}</b>"""
 
@@ -795,7 +987,7 @@ async def _process_privacy_internal(update, context, zip_path, user_id, api_id, 
                     text=f"""<tg-emoji emoji-id="5931409969613116639">📢</tg-emoji> <b>隐私配置任务完成</b>
 
 <tg-emoji emoji-id="5886412370347036129">👤</tg-emoji> 用户: <code>{user_id}</code>
-<tg-emoji emoji-id="5886412370347036129">📊</tg-emoji> 总账号: <b>{len(session_files)}</b>
+<tg-emoji emoji-id="5886412370347036129">📊</tg-emoji> 总账号: <b>{len(accounts)}</b>
 • <tg-emoji emoji-id="5920052658743283381">✅</tg-emoji> 成功: <b>{success_count}</b>
 • <tg-emoji emoji-id="5922712343011135025">❌</tg-emoji> 失败: <b>{failed_count}</b>""",
                     parse_mode='HTML'
