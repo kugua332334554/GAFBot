@@ -13,6 +13,8 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.constants import ParseMode
 from telegram.ext import ContextTypes
 import logging
+from opentele.api import API
+from opentele.td import TDesktop
 
 logger = logging.getLogger(__name__)
 from dotenv import load_dotenv
@@ -105,6 +107,129 @@ def create_back_button():
         callback_data="back_to_main"
     ).to_dict() | {"icon_custom_emoji_id": BACK_BUTTON_EMOJI_ID}
 
+def generate_non_linux_api():
+    max_attempts = 100
+    attempt = 0
+    while attempt < max_attempts:
+        api = API.TelegramDesktop.Generate()
+        if 'linux' not in api.device_model.lower():
+            return api
+        attempt += 1
+    api = API.TelegramDesktop.Generate()
+    api.device_model = "Desktop"
+    return api
+
+def find_tdata_folders(root_dir):
+    tdata_dirs = set()
+    for root, dirs, files in os.walk(root_dir):
+        if os.path.basename(root) == 'tdata':
+            if any(f in files for f in ['key_datas', 'map']):
+                tdata_dirs.add(root)
+        elif 'tdata' in dirs:
+            potential = os.path.join(root, 'tdata')
+            if os.path.exists(potential):
+                sub_files = os.listdir(potential)
+                if any(f in sub_files for f in ['key_datas', 'map']):
+                    tdata_dirs.add(potential)
+    return list(tdata_dirs)
+
+def read_2fa_from_folder(folder_path: str):
+    for file in os.listdir(folder_path):
+        if file.lower() in ['2fa.txt', '2fa', 'password.txt']:
+            try:
+                with open(os.path.join(folder_path, file), 'r', encoding='utf-8') as f:
+                    return f.read().strip()
+            except:
+                pass
+    return None
+
+async def convert_tdata_to_session_with_proxy(tdata_dir, output_dir, twofa, proxy_dict):
+    API_ID = int(os.getenv("TELEGRAM_APP_ID", "2040"))
+    API_HASH = os.getenv("TELEGRAM_APP_HASH", "b18441a1ff607e10a989891a5462e627")
+    
+    try:
+        tdesk = TDesktop(tdata_dir)
+        if not tdesk.isLoaded():
+            return False, None, None, None, "tdata 文件无法加载"
+        
+        from opentele.api import UseCurrentSession
+        client = await tdesk.ToTelethon(
+            session=os.path.join(output_dir, "temp.session"),
+            flag=UseCurrentSession,
+            proxy=proxy_dict
+        )
+        
+        await client.connect()
+        if not await client.is_user_authorized():
+            await client.disconnect()
+            return False, None, None, None, "会话未授权"
+        
+        me = await client.get_me()
+        if not me:
+            await client.disconnect()
+            return False, None, None, None, "无法获取用户信息"
+        
+        phone = me.phone
+        if not phone:
+            await client.disconnect()
+            return False, None, None, None, "无法获取手机号"
+        
+        temp_session = os.path.join(output_dir, "temp.session")
+        final_session = os.path.join(output_dir, f"{phone}.session")
+        if os.path.exists(temp_session):
+            shutil.move(temp_session, final_session)
+        
+        random_api = generate_non_linux_api()
+        try:
+            if hasattr(me, 'date') and me.date:
+                reg_time = datetime.fromtimestamp(me.date.timestamp()).strftime("%Y-%m-%d")
+            else:
+                reg_time = datetime.now().strftime("%Y-%m-%d")
+        except Exception:
+            reg_time = datetime.now().strftime("%Y-%m-%d")
+        
+        json_data = {
+            "api_id": API_ID,
+            "api_hash": API_HASH,
+            "device_model": random_api.device_model,
+            "system_version": random_api.system_version,
+            "app_version": random_api.app_version,
+            "system_lang_code": random_api.system_lang_code,
+            "lang_pack": random_api.lang_pack,
+            "lang_code": random_api.lang_code,
+            "pid": random_api.pid,
+            "user_id": me.id,
+            "phone": phone,
+            "twofa": twofa if twofa else "",
+            "password": twofa if twofa else "",
+            "app_id": API_ID,
+            "app_hash": API_HASH,
+            "session_file": phone,
+            "device": random_api.device_model,
+            "username": me.username or "",
+            "sex": None,
+            "avatar": "img/default.png",
+            "package_id": "",
+            "installer": "",
+            "ipv6": False,
+            "SDK": random_api.system_version,
+            "sdk": random_api.system_version,
+            "system_lang_pack": random_api.system_lang_code,
+            "premium": getattr(me, 'premium', False),
+            "reg_time": reg_time
+        }
+        
+        json_path = os.path.join(output_dir, f"{phone}.json")
+        with open(json_path, 'w', encoding='utf-8') as f:
+            json.dump(json_data, f, ensure_ascii=False, indent=2)
+        
+        await client.disconnect()
+        return True, phone, final_session, json_path, None
+        
+    except Exception as e:
+        logger.error(f"转换 tdata 失败 {tdata_dir}: {e}")
+        return False, None, None, None, str(e)
+
 async def show_convert_api(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -137,7 +262,7 @@ async def handle_api_mode(update: Update, context: ContextTypes.DEFAULT_TYPE):
         keyboard = [[create_back_button()]]
         reply_markup = InlineKeyboardMarkup(keyboard)
         await query.edit_message_text(
-            text="请上传session ZIP包（无2FA）",
+            text="请上传session或tdata的ZIP包（无2FA）",
             parse_mode=ParseMode.HTML,
             reply_markup=reply_markup
         )
@@ -157,7 +282,7 @@ async def handle_api_mode(update: Update, context: ContextTypes.DEFAULT_TYPE):
         keyboard = [[create_back_button()]]
         reply_markup = InlineKeyboardMarkup(keyboard)
         await query.edit_message_text(
-            text="请上传session ZIP包（将自动从同目录JSON提取2FA和手机号）",
+            text="请上传session或tdata的ZIP包（将自动从JSON提取2FA和手机号）",
             parse_mode=ParseMode.HTML,
             reply_markup=reply_markup
         )
@@ -176,7 +301,7 @@ async def handle_api_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [[create_back_button()]]
     reply_markup = InlineKeyboardMarkup(keyboard)
     await update.message.reply_text(
-        "2FA已记录，请上传session ZIP包",
+        "2FA已记录，请上传session或tdata的ZIP包",
         parse_mode=ParseMode.HTML,
         reply_markup=reply_markup
     )
@@ -260,6 +385,7 @@ async def process_conversion(update, context, zip_path, user_id, mode, manual_2f
 
         session_files = []
         json_files = {}
+        tdata_dirs = find_tdata_folders(extract_dir)
 
         for root, _, files in os.walk(extract_dir):
             for f in files:
@@ -269,12 +395,76 @@ async def process_conversion(update, context, zip_path, user_id, mode, manual_2f
                     base = os.path.splitext(f)[0]
                     json_files[base] = os.path.join(root, f)
 
-        if not session_files:
+        accounts = []
+        if session_files:
+            for sess in session_files:
+                session_name = os.path.splitext(os.path.basename(sess))[0]
+                json_file = json_files.get(session_name)
+                accounts.append((session_name, sess, json_file, None))
+        elif tdata_dirs:
+            status_msg = await context.bot.send_message(
+                chat_id=update.effective_chat.id,
+                text=f"""<tg-emoji emoji-id="5839200986022812209">🔄</tg-emoji> <b>检测到tdata，正在转换为session...</b>
+
+找到 <b>{len(tdata_dirs)}</b> 个tdata文件夹
+请稍候...""",
+                parse_mode='HTML'
+            )
+            convert_temp_dir = os.path.join(tmp, "converted_sessions")
+            os.makedirs(convert_temp_dir, exist_ok=True)
+
+            for i, tdata_dir in enumerate(tdata_dirs, 1):
+                parent_dir = os.path.dirname(tdata_dir)
+                twofa = read_2fa_from_folder(parent_dir)
+                proxy = get_random_proxy()
+                proxy_dict = create_proxy_dict(proxy) if proxy else None
+
+                account_out = os.path.join(convert_temp_dir, f"acc_{i}")
+                os.makedirs(account_out, exist_ok=True)
+
+                success, phone, sess_path, json_path, err = await convert_tdata_to_session_with_proxy(
+                    tdata_dir, account_out, twofa, proxy_dict
+                )
+
+                if success and sess_path and json_path:
+                    accounts.append((phone, sess_path, json_path, tdata_dir))
+                else:
+                    logger.error(f"转换失败 {tdata_dir}: {err}")
+
+                if i % 3 == 0 or i == len(tdata_dirs):
+                    try:
+                        await status_msg.edit_text(
+                            text=f"""<tg-emoji emoji-id="5839200986022812209">🔄</tg-emoji> <b>tdata转换进度</b>
+
+进度: {i}/{len(tdata_dirs)}
+成功: {len(accounts)}""",
+                            parse_mode='HTML'
+                        )
+                    except:
+                        pass
+                await asyncio.sleep(0.2)
+
+            try:
+                await status_msg.delete()
+            except:
+                pass
+
+            if not accounts:
+                keyboard = [[create_back_button()]]
+                reply_markup = InlineKeyboardMarkup(keyboard)
+                await context.bot.send_message(
+                    chat_id=update.effective_chat.id,
+                    text="<tg-emoji emoji-id='5778527486270770928'>❌</tg-emoji> 所有tdata转换失败，无法继续",
+                    parse_mode='HTML',
+                    reply_markup=reply_markup
+                )
+                return
+        else:
             keyboard = [[create_back_button()]]
             reply_markup = InlineKeyboardMarkup(keyboard)
             await context.bot.send_message(
                 chat_id=update.effective_chat.id,
-                text="<tg-emoji emoji-id='5778527486270770928'>❌</tg-emoji> 未找到session文件",
+                text="<tg-emoji emoji-id='5778527486270770928'>❌</tg-emoji> 未找到session或tdata文件",
                 parse_mode='HTML',
                 reply_markup=reply_markup
             )
@@ -282,7 +472,7 @@ async def process_conversion(update, context, zip_path, user_id, mode, manual_2f
 
         progress_msg = await context.bot.send_message(
             chat_id=update.effective_chat.id,
-            text=f"<tg-emoji emoji-id='5839200986022812209'>🔄</tg-emoji> 处理中: 0/{len(session_files)}",
+            text=f"<tg-emoji emoji-id='5839200986022812209'>🔄</tg-emoji> 处理中: 0/{len(accounts)}",
             parse_mode='HTML'
         )
 
@@ -295,7 +485,7 @@ async def process_conversion(update, context, zip_path, user_id, mode, manual_2f
         if DM:
             api_prefix = f"{DM}"
 
-        for i, session_path in enumerate(session_files, 1):
+        for i, (phone, session_path, json_path, tdata_dir) in enumerate(accounts, 1):
             new_id = generate_id()
             while new_id in used_ids:
                 new_id = generate_id()
@@ -304,8 +494,6 @@ async def process_conversion(update, context, zip_path, user_id, mode, manual_2f
             new_session = os.path.join("acd", f"{new_id}.session")
             shutil.copy2(session_path, new_session)
 
-            session_name = os.path.splitext(os.path.basename(session_path))[0]
-            json_path = json_files.get(session_name)
             json_config = {}
             if json_path and os.path.exists(json_path):
                 try:
@@ -313,6 +501,7 @@ async def process_conversion(update, context, zip_path, user_id, mode, manual_2f
                         json_config = json.load(f)
                 except Exception as e:
                     logger.debug(f"读取JSON失败 {json_path}: {e}")
+
             _app_id = json_config.get('app_id')
             if _app_id is None:
                 _app_id = api_id
@@ -329,18 +518,18 @@ async def process_conversion(update, context, zip_path, user_id, mode, manual_2f
             device_model = json_config.get('device_model') or None
             app_version = json_config.get('app_version') or None
             system_lang_code = json_config.get('system_lang_code') or None
-            system_vision = json_config.get('sdk') or None
+            system_vision = json_config.get('sdk') or json_config.get('system_version') or None
             lang_pack = json_config.get('lang_pack') or None
 
-            phone = "unknown"
+            phone_number = "unknown"
             phone_fields = ['phone', 'number', 'phone_number', 'Phone', '账号', '电话号码', '手机号']
             for field in phone_fields:
                 val = json_config.get(field)
                 if val:
-                    phone = str(val)
+                    phone_number = str(val)
                     break
-            if phone == "unknown":
-                phone = session_name
+            if phone_number == "unknown":
+                phone_number = phone if phone else os.path.splitext(os.path.basename(session_path))[0]
 
             two_fa = None
             if mode == "manual":
@@ -359,7 +548,7 @@ async def process_conversion(update, context, zip_path, user_id, mode, manual_2f
                         logger.debug(f"读取JSON失败 {json_path}: {e}")
 
             api_data[new_id] = {
-                "phone": phone,
+                "phone": phone_number,
                 "two_fa": two_fa if two_fa else "",
                 "app_id": _app_id,
                 "app_hash": _app_hash,
@@ -370,15 +559,15 @@ async def process_conversion(update, context, zip_path, user_id, mode, manual_2f
                 "lang_pack": lang_pack
             }
 
-            line = f"{phone} --- {api_prefix}/getcode?id={new_id}"
+            line = f"{phone_number} --- {api_prefix}/getcode?id={new_id}"
             if two_fa:
                 line += f" (2FA: {two_fa})"
             lines.append(line)
 
-            if i % 5 == 0 or i == len(session_files):
+            if i % 5 == 0 or i == len(accounts):
                 try:
                     await progress_msg.edit_text(
-                        f"<tg-emoji emoji-id='5839200986022812209'>🔄</tg-emoji> 处理中: {i}/{len(session_files)}",
+                        f"<tg-emoji emoji-id='5839200986022812209'>🔄</tg-emoji> 处理中: {i}/{len(accounts)}",
                         parse_mode='HTML'
                     )
                 except:
@@ -408,7 +597,7 @@ async def process_conversion(update, context, zip_path, user_id, mode, manual_2f
             chat_id=update.effective_chat.id,
             text=f"""<tg-emoji emoji-id="5909201569898827582">✅</tg-emoji> <b>转换完成</b>
 
-<tg-emoji emoji-id="5931472654660800739">📊</tg-emoji> 总计: <b>{len(session_files)}</b>""",
+<tg-emoji emoji-id="5931472654660800739">📊</tg-emoji> 总计: <b>{len(accounts)}</b>""",
             parse_mode='HTML'
         )
 
