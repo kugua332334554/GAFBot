@@ -11,7 +11,8 @@ import logging
 from telegram import InlineKeyboardMarkup
 from dotenv import load_dotenv
 from opentele.tl import TelegramClient
-from opentele.api import API
+from opentele.api import API, UseCurrentSession
+from opentele.td import TDesktop
 from telethon.errors import SessionPasswordNeededError, FloodWaitError
 from telethon.tl.functions.help import GetAppConfigRequest
 
@@ -288,6 +289,128 @@ def get_total_size(path):
                 total += os.path.getsize(fp)
     return total
 
+def read_2fa_from_folder(folder_path: str):
+    for file in os.listdir(folder_path):
+        if file.lower() in ['2fa.txt', '2fa', 'password.txt']:
+            try:
+                with open(os.path.join(folder_path, file), 'r', encoding='utf-8') as f:
+                    return f.read().strip()
+            except:
+                pass
+    return None
+
+def generate_non_linux_api():
+    max_attempts = 100
+    attempt = 0
+    while attempt < max_attempts:
+        api = API.TelegramDesktop.Generate()
+        if 'linux' not in api.device_model.lower():
+            return api
+        attempt += 1
+    api = API.TelegramDesktop.Generate()
+    api.device_model = "Desktop"
+    return api
+
+def find_tdata_folders(root_dir):
+    tdata_dirs = set()
+    for root, dirs, files in os.walk(root_dir):
+        if os.path.basename(root) == 'tdata':
+            if any(f in files for f in ['key_datas', 'map']):
+                tdata_dirs.add(root)
+        elif 'tdata' in dirs:
+            potential = os.path.join(root, 'tdata')
+            if os.path.exists(potential):
+                sub_files = os.listdir(potential)
+                if any(f in sub_files for f in ['key_datas', 'map']):
+                    tdata_dirs.add(potential)
+    return list(tdata_dirs)
+
+async def convert_tdata_to_session_with_proxy(tdata_dir, output_dir, twofa, proxy_dict):
+    API_ID = int(os.getenv("TELEGRAM_APP_ID", "2040"))
+    API_HASH = os.getenv("TELEGRAM_APP_HASH", "b18441a1ff607e10a989891a5462e627")
+
+    try:
+        tdesk = TDesktop(tdata_dir)
+        if not tdesk.isLoaded():
+            return False, None, None, None, "tdata 文件无法加载"
+
+        client = await tdesk.ToTelethon(
+            session=os.path.join(output_dir, "temp.session"),
+            flag=UseCurrentSession,
+            proxy=proxy_dict
+        )
+
+        await client.connect()
+        if not await client.is_user_authorized():
+            await client.disconnect()
+            return False, None, None, None, "会话未授权"
+
+        me = await client.get_me()
+        if not me:
+            await client.disconnect()
+            return False, None, None, None, "无法获取用户信息"
+
+        phone = me.phone
+        if not phone:
+            await client.disconnect()
+            return False, None, None, None, "无法获取手机号"
+
+        temp_session = os.path.join(output_dir, "temp.session")
+        final_session = os.path.join(output_dir, f"{phone}.session")
+        if os.path.exists(temp_session):
+            shutil.move(temp_session, final_session)
+
+        random_api = generate_non_linux_api()
+        try:
+            if hasattr(me, 'date') and me.date:
+                reg_time = datetime.fromtimestamp(me.date.timestamp()).strftime("%Y-%m-%d")
+            else:
+                reg_time = datetime.now().strftime("%Y-%m-%d")
+        except Exception:
+            reg_time = datetime.now().strftime("%Y-%m-%d")
+
+        json_data = {
+            "api_id": API_ID,
+            "api_hash": API_HASH,
+            "device_model": random_api.device_model,
+            "system_version": random_api.system_version,
+            "app_version": random_api.app_version,
+            "system_lang_code": random_api.system_lang_code,
+            "lang_pack": random_api.lang_pack,
+            "lang_code": random_api.lang_code,
+            "pid": random_api.pid,
+            "user_id": me.id,
+            "phone": phone,
+            "twofa": twofa if twofa else "",
+            "password": twofa if twofa else "",
+            "app_id": API_ID,
+            "app_hash": API_HASH,
+            "session_file": phone,
+            "device": random_api.device_model,
+            "username": me.username or "",
+            "sex": None,
+            "avatar": "img/default.png",
+            "package_id": "",
+            "installer": "",
+            "ipv6": False,
+            "SDK": random_api.system_version,
+            "sdk": random_api.system_version,
+            "system_lang_pack": random_api.system_lang_code,
+            "premium": getattr(me, 'premium', False),
+            "reg_time": reg_time
+        }
+
+        json_path = os.path.join(output_dir, f"{phone}.json")
+        with open(json_path, 'w', encoding='utf-8') as f:
+            json.dump(json_data, f, ensure_ascii=False, indent=2)
+
+        await client.disconnect()
+        return True, phone, final_session, json_path, None
+
+    except Exception as e:
+        logger.error(f"转换 tdata 失败 {tdata_dir}: {e}")
+        return False, None, None, None, str(e)
+
 async def handle_shaihuo_document(update, context, user_id, user_states):
     document = update.message.document
     if not document.file_name.endswith('.zip'):
@@ -413,25 +536,93 @@ async def _process_shaihuo_internal(update, context, zip_path, user_id, api_id, 
         for root, dirs, files in os.walk(extract_dir):
             for file in files:
                 if file.endswith('.session'):
-                    session_path = os.path.join(root, file)
-                    session_files.append(session_path)
+                    session_files.append(os.path.join(root, file))
 
-        if not session_files:
-            keyboard = [[create_back_button()]]
-            reply_markup = InlineKeyboardMarkup(keyboard)
-            await context.bot.send_message(
+        accounts = []
+        if session_files:
+            for sess in session_files:
+                session_name = os.path.splitext(os.path.basename(sess))[0]
+                json_file = os.path.join(os.path.dirname(sess), f"{session_name}.json")
+                if not os.path.exists(json_file):
+                    json_file = None
+                accounts.append((session_name, sess, json_file, None))
+        else:
+            tdata_dirs = find_tdata_folders(extract_dir)
+            if not tdata_dirs:
+                keyboard = [[create_back_button()]]
+                reply_markup = InlineKeyboardMarkup(keyboard)
+                await context.bot.send_message(
+                    chat_id=update.effective_chat.id,
+                    text="<tg-emoji emoji-id='5886496611835581345'>❌</tg-emoji> 未找到session或tdata文件夹",
+                    parse_mode='HTML',
+                    reply_markup=reply_markup
+                )
+                return
+
+            status_msg = await context.bot.send_message(
                 chat_id=update.effective_chat.id,
-                text="<tg-emoji emoji-id='5886496611835581345'>❌</tg-emoji> 未找到session文件",
-                parse_mode='HTML',
-                reply_markup=reply_markup
+                text=f"""<tg-emoji emoji-id="5942826671290715541">🔄</tg-emoji> <b>检测到tdata，正在转换为session...</b>
+
+找到 <b>{len(tdata_dirs)}</b> 个tdata文件夹
+请稍候...""",
+                parse_mode='HTML'
             )
-            return
+
+            convert_temp_dir = os.path.join(temp_dir, "converted_sessions")
+            os.makedirs(convert_temp_dir, exist_ok=True)
+
+            for i, tdata_dir in enumerate(tdata_dirs, 1):
+                parent_dir = os.path.dirname(tdata_dir)
+                twofa = read_2fa_from_folder(parent_dir)
+                proxy = get_random_proxy()
+                proxy_dict = create_proxy_dict(proxy) if proxy else None
+
+                account_out = os.path.join(convert_temp_dir, f"acc_{i}")
+                os.makedirs(account_out, exist_ok=True)
+
+                success, phone, sess_path, json_path, err = await convert_tdata_to_session_with_proxy(
+                    tdata_dir, account_out, twofa, proxy_dict
+                )
+
+                if success and sess_path and json_path:
+                    accounts.append((phone, sess_path, json_path, tdata_dir))
+                else:
+                    logger.error(f"转换失败 {tdata_dir}: {err}")
+
+                if i % 3 == 0 or i == len(tdata_dirs):
+                    try:
+                        await status_msg.edit_text(
+                            text=f"""<tg-emoji emoji-id="5942826671290715541">🔄</tg-emoji> <b>tdata转换进度</b>
+
+进度: {i}/{len(tdata_dirs)}
+成功: {len(accounts)}""",
+                            parse_mode='HTML'
+                        )
+                    except:
+                        pass
+                await asyncio.sleep(0.2)
+
+            try:
+                await status_msg.delete()
+            except:
+                pass
+
+            if not accounts:
+                keyboard = [[create_back_button()]]
+                reply_markup = InlineKeyboardMarkup(keyboard)
+                await context.bot.send_message(
+                    chat_id=update.effective_chat.id,
+                    text="<tg-emoji emoji-id='5886496611835581345'>❌</tg-emoji> 所有tdata转换失败，无法筛活",
+                    parse_mode='HTML',
+                    reply_markup=reply_markup
+                )
+                return
 
         status_msg = await context.bot.send_message(
             chat_id=update.effective_chat.id,
             text=f"""<tg-emoji emoji-id="5942826671290715541">🔍</tg-emoji> <b>筛活进行中</b>
 
-找到 <b>{len(session_files)}</b> 个session文件
+找到 <b>{len(accounts)}</b> 个账号
 正在检测存活状态，请稍候...""",
             parse_mode='HTML'
         )
@@ -447,34 +638,10 @@ async def _process_shaihuo_internal(update, context, zip_path, user_id, api_id, 
         frozen_count = 0
         dead_count = 0
 
-        for i, session_file in enumerate(session_files, 1):
-            session_name = os.path.splitext(os.path.basename(session_file))[0]
-            json_file = os.path.join(os.path.dirname(session_file), f"{session_name}.json")
-            if not os.path.exists(json_file):
-                json_file = None
-
-            if i % 5 == 0 or i == len(session_files):
-                try:
-                    await status_msg.edit_text(
-                        text=f"""<tg-emoji emoji-id="5942826671290715541">🔍</tg-emoji> <b>筛活进行中</b>
-
-进度: {i}/{len(session_files)}
-<tg-emoji emoji-id="5920052658743283381">✅</tg-emoji>存活: {alive_count} | <tg-emoji emoji-id="5985347654974967782">❄️</tg-emoji>冻结: {frozen_count} | <tg-emoji emoji-id="5922712343011135025">❌</tg-emoji>失效: {dead_count}""",
-                        parse_mode='HTML'
-                    )
-                except:
-                    pass
-
-            status, reason, final_json_file, freeze_info = await check_session_alive(session_file, json_file, api_id, api_hash)
-
-            phone = session_name
-            if final_json_file and os.path.exists(final_json_file):
-                try:
-                    with open(final_json_file, 'r', encoding='utf-8') as f:
-                        jdata = json.load(f)
-                        phone = jdata.get('phone', session_name)
-                except:
-                    pass
+        for i, (phone, session_file, json_file, tdata_dir) in enumerate(accounts, 1):
+            status, reason, final_json_file, freeze_info = await check_session_alive(
+                session_file, json_file, api_id, api_hash
+            )
 
             if status == 'alive':
                 target_dir = os.path.join(alive_dir, phone)
@@ -488,24 +655,31 @@ async def _process_shaihuo_internal(update, context, zip_path, user_id, api_id, 
 
             os.makedirs(target_dir, exist_ok=True)
 
-            try:
+            if tdata_dir and os.path.exists(tdata_dir):
+                tdata_target = os.path.join(target_dir, "tdata")
+                shutil.copytree(tdata_dir, tdata_target, dirs_exist_ok=True)
+            if session_file and os.path.exists(session_file):
                 shutil.copy2(session_file, os.path.join(target_dir, os.path.basename(session_file)))
-            except:
-                pass
             if final_json_file and os.path.exists(final_json_file):
-                try:
-                    shutil.copy2(final_json_file, os.path.join(target_dir, os.path.basename(final_json_file)))
-                except:
-                    pass
+                shutil.copy2(final_json_file, os.path.join(target_dir, os.path.basename(final_json_file)))
 
             if status == 'frozen' and freeze_info:
-                frozen_txt_path = os.path.join(target_dir, "frozen.txt")
+                frozen_txt = os.path.join(target_dir, "frozen.txt")
+                with open(frozen_txt, 'w', encoding='utf-8') as f:
+                    f.write(f"冻结开始时间: {freeze_info['since']}\n")
+                    f.write(f"冻结结束时间: {freeze_info['until']}\n")
+
+            if i % 5 == 0 or i == len(accounts):
                 try:
-                    with open(frozen_txt_path, 'w', encoding='utf-8') as f:
-                        f.write(f"冻结开始时间: {freeze_info['since']}\n")
-                        f.write(f"冻结结束时间: {freeze_info['until']}\n")
-                except Exception as e:
-                    logger.error(f"写入 frozen.txt 失败: {e}")
+                    await status_msg.edit_text(
+                        text=f"""<tg-emoji emoji-id="5942826671290715541">🔍</tg-emoji> <b>筛活进行中</b>
+
+进度: {i}/{len(accounts)}
+<tg-emoji emoji-id="5920052658743283381">✅</tg-emoji>存活: {alive_count} | <tg-emoji emoji-id="5985347654974967782">❄️</tg-emoji>冻结: {frozen_count} | <tg-emoji emoji-id="5922712343011135025">❌</tg-emoji>失效: {dead_count}""",
+                        parse_mode='HTML'
+                    )
+                except:
+                    pass
 
             await asyncio.sleep(0.5)
 
@@ -539,7 +713,7 @@ async def _process_shaihuo_internal(update, context, zip_path, user_id, api_id, 
         result_text = f"""<tg-emoji emoji-id="5845955401916355857">✅</tg-emoji> <b>筛活完成</b>
 
 <tg-emoji emoji-id="5931472654660800739">📊</tg-emoji> 统计结果:
-• <tg-emoji emoji-id="5879770735999717115">👤</tg-emoji> 总账号: <b>{len(session_files)}</b>
+• <tg-emoji emoji-id="5879770735999717115">👤</tg-emoji> 总账号: <b>{len(accounts)}</b>
 • <tg-emoji emoji-id="5920052658743283381">✅</tg-emoji> 存活: <b>{alive_count}</b>
 • <tg-emoji emoji-id="5985347654974967782">❄️</tg-emoji> 冻结: <b>{frozen_count}</b>
 • <tg-emoji emoji-id="5922712343011135025">❌</tg-emoji> 失效: <b>{dead_count}</b>"""
@@ -604,7 +778,7 @@ async def _process_shaihuo_internal(update, context, zip_path, user_id, api_id, 
                     text=f"""<tg-emoji emoji-id="5771695636411847302">📢</tg-emoji> <b>筛活任务完成</b>
 
 <tg-emoji emoji-id="5879770735999717115">👤</tg-emoji> 用户: <code>{user_id}</code>
-<tg-emoji emoji-id="5764747792371160364">📊</tg-emoji> 总账号: <b>{len(session_files)}</b>
+<tg-emoji emoji-id="5764747792371160364">📊</tg-emoji> 总账号: <b>{len(accounts)}</b>
 <tg-emoji emoji-id="5920052658743283381">✅</tg-emoji> 存活: <b>{alive_count}</b>
 <tg-emoji emoji-id="5985347654974967782">❄️</tg-emoji> 冻结: <b>{frozen_count}</b>
 <tg-emoji emoji-id="5922712343011135025">❌</tg-emoji> 失效: <b>{dead_count}</b>""",
