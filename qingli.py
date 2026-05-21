@@ -21,6 +21,7 @@ from telegram.ext import ContextTypes
 from dotenv import load_dotenv
 from opentele.tl import TelegramClient
 from opentele.api import API
+from opentele.td import TDesktop
 from telethon.tl.functions.contacts import BlockRequest
 load_dotenv()
 logger = logging.getLogger(__name__)
@@ -202,6 +203,118 @@ def create_back_button():
         callback_data="back_to_main"
     ).to_dict() | {"icon_custom_emoji_id": BACK_BUTTON_EMOJI_ID}
 
+def generate_non_linux_api():
+    max_attempts = 100
+    attempt = 0
+    while attempt < max_attempts:
+        api = API.TelegramDesktop.Generate()
+        if 'linux' not in api.device_model.lower():
+            return api
+        attempt += 1
+    api = API.TelegramDesktop.Generate()
+    api.device_model = "Desktop"
+    return api
+
+def find_tdata_folders(root_dir):
+    tdata_dirs = set()
+    for root, dirs, files in os.walk(root_dir):
+        if os.path.basename(root) == 'tdata':
+            if any(f in files for f in ['key_datas', 'map']):
+                tdata_dirs.add(root)
+        elif 'tdata' in dirs:
+            potential = os.path.join(root, 'tdata')
+            if os.path.exists(potential):
+                sub_files = os.listdir(potential)
+                if any(f in sub_files for f in ['key_datas', 'map']):
+                    tdata_dirs.add(potential)
+    return list(tdata_dirs)
+
+def read_2fa_from_folder(folder_path: str):
+    for file in os.listdir(folder_path):
+        if file.lower() in ['2fa.txt', '2fa', 'password.txt']:
+            try:
+                with open(os.path.join(folder_path, file), 'r', encoding='utf-8') as f:
+                    return f.read().strip()
+            except:
+                pass
+    return None
+
+async def convert_tdata_to_session_with_proxy(tdata_dir, output_dir, twofa, proxy_dict):
+    API_ID = int(os.getenv("TELEGRAM_APP_ID", "2040"))
+    API_HASH = os.getenv("TELEGRAM_APP_HASH", "b18441a1ff607e10a989891a5462e627")
+    try:
+        tdesk = TDesktop(tdata_dir)
+        if not tdesk.isLoaded():
+            return False, None, None, None, "tdata 文件无法加载"
+        from opentele.api import UseCurrentSession
+        client = await tdesk.ToTelethon(
+            session=os.path.join(output_dir, "temp.session"),
+            flag=UseCurrentSession,
+            proxy=proxy_dict
+        )
+        await client.connect()
+        if not await client.is_user_authorized():
+            await client.disconnect()
+            return False, None, None, None, "会话未授权"
+        me = await client.get_me()
+        if not me:
+            await client.disconnect()
+            return False, None, None, None, "无法获取用户信息"
+        phone = me.phone
+        if not phone:
+            await client.disconnect()
+            return False, None, None, None, "无法获取手机号"
+        temp_session = os.path.join(output_dir, "temp.session")
+        final_session = os.path.join(output_dir, f"{phone}.session")
+        if os.path.exists(temp_session):
+            shutil.move(temp_session, final_session)
+        random_api = generate_non_linux_api()
+        try:
+            if hasattr(me, 'date') and me.date:
+                reg_time = datetime.fromtimestamp(me.date.timestamp()).strftime("%Y-%m-%d")
+            else:
+                reg_time = datetime.now().strftime("%Y-%m-%d")
+        except Exception:
+            reg_time = datetime.now().strftime("%Y-%m-%d")
+        json_data = {
+            "api_id": API_ID,
+            "api_hash": API_HASH,
+            "device_model": random_api.device_model,
+            "system_version": random_api.system_version,
+            "app_version": random_api.app_version,
+            "system_lang_code": random_api.system_lang_code,
+            "lang_pack": random_api.lang_pack,
+            "lang_code": random_api.lang_code,
+            "pid": random_api.pid,
+            "user_id": me.id,
+            "phone": phone,
+            "twofa": twofa if twofa else "",
+            "password": twofa if twofa else "",
+            "app_id": API_ID,
+            "app_hash": API_HASH,
+            "session_file": phone,
+            "device": random_api.device_model,
+            "username": me.username or "",
+            "sex": None,
+            "avatar": "img/default.png",
+            "package_id": "",
+            "installer": "",
+            "ipv6": False,
+            "SDK": random_api.system_version,
+            "sdk": random_api.system_version,
+            "system_lang_pack": random_api.system_lang_code,
+            "premium": getattr(me, 'premium', False),
+            "reg_time": reg_time
+        }
+        json_path = os.path.join(output_dir, f"{phone}.json")
+        with open(json_path, 'w', encoding='utf-8') as f:
+            json.dump(json_data, f, ensure_ascii=False, indent=2)
+        await client.disconnect()
+        return True, phone, final_session, json_path, None
+    except Exception as e:
+        logger.error(f"转换 tdata 失败 {tdata_dir}: {e}")
+        return False, None, None, None, str(e)
+
 async def show_clean_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     user_id = str(query.from_user.id)
@@ -253,7 +366,7 @@ async def handle_clean_selection(update: Update, context: ContextTypes.DEFAULT_T
     await query.edit_message_text(
         text=f"""<tg-emoji emoji-id="5920052658743283381">✅</tg-emoji> 已选择: {type_names[clean_type]}
 
-<tg-emoji emoji-id="5877540355187937244">📤</tg-emoji> 请上传包含session和json的ZIP文件""",
+<tg-emoji emoji-id="5877540355187937244">📤</tg-emoji> 请上传包含session或tdata的ZIP文件""",
         parse_mode=ParseMode.HTML,
         reply_markup=reply_markup
     )
@@ -527,16 +640,85 @@ async def _process_clean_internal(update, context, zip_path, user_id, api_id, ap
                     session_path = os.path.join(root, file)
                     session_files.append(session_path)
 
-        if not session_files:
-            keyboard = [[create_back_button()]]
-            reply_markup = InlineKeyboardMarkup(keyboard)
-            await context.bot.send_message(
+        accounts = []
+        if session_files:
+            for sess in session_files:
+                session_name = os.path.splitext(os.path.basename(sess))[0]
+                json_file = os.path.join(os.path.dirname(sess), f"{session_name}.json")
+                if not os.path.exists(json_file):
+                    json_file = None
+                accounts.append((session_name, sess, json_file, None))
+        else:
+            tdata_dirs = find_tdata_folders(extract_dir)
+            if not tdata_dirs:
+                keyboard = [[create_back_button()]]
+                reply_markup = InlineKeyboardMarkup(keyboard)
+                await context.bot.send_message(
+                    chat_id=update.effective_chat.id,
+                    text="<tg-emoji emoji-id='5778527486270770928'>❌</tg-emoji> 未找到session或tdata文件夹",
+                    parse_mode='HTML',
+                    reply_markup=reply_markup
+                )
+                return
+            
+            status_msg = await context.bot.send_message(
                 chat_id=update.effective_chat.id,
-                text="<tg-emoji emoji-id='5778527486270770928'>❌</tg-emoji> 未找到session文件",
-                parse_mode='HTML',
-                reply_markup=reply_markup
+                text=f"""<tg-emoji emoji-id="5839200986022812209">🔄</tg-emoji> <b>检测到tdata，正在转换为session...</b>
+
+找到 <b>{len(tdata_dirs)}</b> 个tdata文件夹
+请稍候...""",
+                parse_mode='HTML'
             )
-            return
+            
+            convert_temp_dir = os.path.join(temp_dir, "converted_sessions")
+            os.makedirs(convert_temp_dir, exist_ok=True)
+            
+            for i, tdata_dir in enumerate(tdata_dirs, 1):
+                parent_dir = os.path.dirname(tdata_dir)
+                twofa = read_2fa_from_folder(parent_dir)
+                proxy = get_random_proxy()
+                proxy_dict = create_proxy_dict(proxy) if proxy else None
+                
+                account_out = os.path.join(convert_temp_dir, f"acc_{i}")
+                os.makedirs(account_out, exist_ok=True)
+                
+                success, phone, sess_path, json_path, err = await convert_tdata_to_session_with_proxy(
+                    tdata_dir, account_out, twofa, proxy_dict
+                )
+                
+                if success and sess_path and json_path:
+                    accounts.append((phone, sess_path, json_path, tdata_dir))
+                else:
+                    logger.error(f"转换失败 {tdata_dir}: {err}")
+                
+                if i % 3 == 0 or i == len(tdata_dirs):
+                    try:
+                        await status_msg.edit_text(
+                            text=f"""<tg-emoji emoji-id="5839200986022812209">🔄</tg-emoji> <b>tdata转换进度</b>
+
+进度: {i}/{len(tdata_dirs)}
+成功: {len(accounts)}""",
+                            parse_mode='HTML'
+                        )
+                    except:
+                        pass
+                await asyncio.sleep(0.2)
+            
+            try:
+                await status_msg.delete()
+            except:
+                pass
+            
+            if not accounts:
+                keyboard = [[create_back_button()]]
+                reply_markup = InlineKeyboardMarkup(keyboard)
+                await context.bot.send_message(
+                    chat_id=update.effective_chat.id,
+                    text="<tg-emoji emoji-id='5778527486270770928'>❌</tg-emoji> 所有tdata转换失败，无法继续",
+                    parse_mode='HTML',
+                    reply_markup=reply_markup
+                )
+                return
 
         type_names = {
             "chats": "删除所有对话",
@@ -550,7 +732,7 @@ async def _process_clean_internal(update, context, zip_path, user_id, api_id, ap
             text=f"""<tg-emoji emoji-id="5839200986022812209">🔄</tg-emoji> <b>清理账号进行中</b>
 
 清理类型: {type_names[clean_type]}
-找到 <b>{len(session_files)}</b> 个session文件
+找到 <b>{len(accounts)}</b> 个账号
 <tg-emoji emoji-id="5775887550262546277">🔄</tg-emoji>正在处理，请稍候...""",
             parse_mode='HTML'
         )
@@ -564,18 +746,13 @@ async def _process_clean_internal(update, context, zip_path, user_id, api_id, ap
         failed_count = 0
         results = []
 
-        for i, session_file in enumerate(session_files, 1):
-            session_name = os.path.splitext(os.path.basename(session_file))[0]
-            json_file = os.path.join(os.path.dirname(session_file), f"{session_name}.json")
-            if not os.path.exists(json_file):
-                json_file = None
-
-            if i % 3 == 0 or i == len(session_files):
+        for i, (phone, session_file, json_file, tdata_dir) in enumerate(accounts, 1):
+            if i % 3 == 0 or i == len(accounts):
                 try:
                     await status_msg.edit_text(
                         text=f"""<tg-emoji emoji-id="5839200986022812209">🔄</tg-emoji> <b>清理账号进行中</b>
 
-进度: {i}/{len(session_files)}
+进度: {i}/{len(accounts)}
 <tg-emoji emoji-id="5920052658743283381">✅</tg-emoji>成功: {success_count} | <tg-emoji emoji-id="5922712343011135025">❌</tg-emoji>失败: {failed_count}""",
                         parse_mode='HTML'
                     )
@@ -641,7 +818,8 @@ async def _process_clean_internal(update, context, zip_path, user_id, api_id, ap
                     logger.warning(f"账号 {os.path.basename(session_file)} 未授权")
                 else:
                     me = await client.get_me()
-                    logger.info(f"开始处理账号 {me.phone} ({os.path.basename(session_file)})")
+                    account_phone = me.phone if me else phone
+                    logger.info(f"开始处理账号 {account_phone} ({os.path.basename(session_file)})")
 
                     if not json_file:
                         generated_json = await generate_json_for_session(
@@ -653,7 +831,7 @@ async def _process_clean_internal(update, context, zip_path, user_id, api_id, ap
                     clean_results = await clean_account_operations(client, clean_type)
                     result = {
                         "session": os.path.basename(session_file),
-                        "phone": me.phone if me else "unknown",
+                        "phone": account_phone,
                         "status": "success",
                         "chats_deleted": clean_results["chats_deleted"],
                         "contacts_deleted": clean_results["contacts_deleted"],
@@ -662,12 +840,23 @@ async def _process_clean_internal(update, context, zip_path, user_id, api_id, ap
                     }
                     target_dir = success_dir
                     success_count += 1
-                    logger.info(f"账号 {me.phone} 清理完成: 对话={clean_results['chats_deleted']}, 联系人={clean_results['contacts_deleted']}, Passkey={clean_results['passkeys_deleted']}, 错误数={len(clean_results['errors'])}")
+                    logger.info(f"账号 {account_phone} 清理完成: 对话={clean_results['chats_deleted']}, 联系人={clean_results['contacts_deleted']}, Passkey={clean_results['passkeys_deleted']}, 错误数={len(clean_results['errors'])}")
 
                 results.append(result)
-                shutil.copy2(session_file, os.path.join(target_dir, os.path.basename(session_file)))
+                
+                account_folder_name = account_phone if result.get("phone") else phone
+                account_folder = os.path.join(target_dir, account_folder_name)
+                os.makedirs(account_folder, exist_ok=True)
+                
+                if tdata_dir and os.path.exists(tdata_dir):
+                    tdata_target = os.path.join(account_folder, "tdata")
+                    shutil.copytree(tdata_dir, tdata_target, dirs_exist_ok=True)
+                
+                if session_file and os.path.exists(session_file):
+                    shutil.copy2(session_file, os.path.join(account_folder, os.path.basename(session_file)))
                 if json_file and os.path.exists(json_file):
-                    shutil.copy2(json_file, os.path.join(target_dir, os.path.basename(json_file)))
+                    shutil.copy2(json_file, os.path.join(account_folder, os.path.basename(json_file)))
+                
                 await asyncio.sleep(1)
 
             except FloodWaitError as e:
@@ -711,7 +900,7 @@ async def _process_clean_internal(update, context, zip_path, user_id, api_id, ap
         result_text = f"""<tg-emoji emoji-id="5909201569898827582">✅</tg-emoji> <b>清理账号完成</b>
 
 <tg-emoji emoji-id="5931472654660800739">📊</tg-emoji> 统计结果:
-• <tg-emoji emoji-id="5886412370347036129">👤</tg-emoji> 总账号: <b>{len(session_files)}</b>
+• <tg-emoji emoji-id="5886412370347036129">👤</tg-emoji> 总账号: <b>{len(accounts)}</b>
 • <tg-emoji emoji-id="5920052658743283381">✅</tg-emoji> 成功: <b>{success_count}</b>
 • <tg-emoji emoji-id="5922712343011135025">❌</tg-emoji> 失败: <b>{failed_count}</b>
 • <tg-emoji emoji-id="5877307202888273539">💬</tg-emoji> 删除对话: <b>{total_chats}</b>
@@ -755,7 +944,7 @@ async def _process_clean_internal(update, context, zip_path, user_id, api_id, ap
 
 <tg-emoji emoji-id="5886412370347036129">👤</tg-emoji> 用户: <code>{user_id}</code>
 清理类型: {type_names[clean_type]}
-<tg-emoji emoji-id="5931472654660800739">📊</tg-emoji> 总账号: <b>{len(session_files)}</b>
+<tg-emoji emoji-id="5931472654660800739">📊</tg-emoji> 总账号: <b>{len(accounts)}</b>
 • <tg-emoji emoji-id="5920052658743283381">✅</tg-emoji> 成功: <b>{success_count}</b>
 • <tg-emoji emoji-id="5922712343011135025">❌</tg-emoji> 失败: <b>{failed_count}</b>
 • <tg-emoji emoji-id="5877307202888273539">💬</tg-emoji> 删除对话: <b>{total_chats}</b>
