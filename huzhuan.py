@@ -143,10 +143,11 @@ async def convert_session_to_tdata(session_path: str, output_dir: str, twofa: Op
         os.makedirs(tdata_dir, exist_ok=True)
 
         tdesk.SaveTData(tdata_dir)
-
-        if twofa:
-            with open(os.path.join(account_dir, "2fa.txt"), 'w', encoding='utf-8') as f:
+        with open(os.path.join(account_dir, "2fa.txt"), 'w', encoding='utf-8') as f:
+            if twofa:
                 f.write(twofa)
+            else:
+                f.write("无2FA密码。")
 
         return True, account_name, account_dir
 
