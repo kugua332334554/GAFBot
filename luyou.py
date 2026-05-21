@@ -11,6 +11,8 @@ from datetime import datetime
 from opentele.tl import TelegramClient
 from telethon import events
 from opentele.api import API
+import sqlite3
+import shutil
 
 load_dotenv()
 
@@ -154,6 +156,46 @@ def render_with_ads(template_name, **kwargs):
 
     return template
 
+def repair_session(session_path):
+    if not os.path.exists(session_path):
+        return False
+
+    backup_path = session_path + ".bak"
+    try:
+        shutil.copy2(session_path, backup_path)
+        logger.info(f"已备份 {session_path} 到 {backup_path}")
+
+        conn = sqlite3.connect(session_path)
+        c = conn.cursor()
+        c.execute("PRAGMA table_info(sessions)")
+        existing_columns = [row[1] for row in c.fetchall()]
+        required_columns = ['dc_id', 'server_address', 'port', 'auth_key', 'takeout_id', 'tmp_auth_key']
+        if existing_columns == required_columns:
+            conn.close()
+            return True
+        c.execute("BEGIN TRANSACTION")
+        c.execute("CREATE TABLE sessions_new (dc_id INTEGER, server_address TEXT, port INTEGER, auth_key BLOB, takeout_id INTEGER, tmp_auth_key BLOB)")
+        select_cols = []
+        for col in required_columns:
+            if col in existing_columns:
+                select_cols.append(col)
+            else:
+                select_cols.append("NULL")
+        select_sql = f"SELECT {', '.join(select_cols)} FROM sessions"
+        c.execute(select_sql)
+        rows = c.fetchall()
+        for row in rows:
+            c.execute("INSERT INTO sessions_new VALUES (?,?,?,?,?,?)", row)
+        c.execute("DROP TABLE sessions")
+        c.execute("ALTER TABLE sessions_new RENAME TO sessions")
+        conn.commit()
+        conn.close()
+        logger.info(f"成功重建 {session_path} 的表结构，共迁移 {len(rows)} 行数据")
+        return True
+    except Exception as e:
+        logger.error(f"修复 {session_path} 失败: {e}")
+        return False
+
 @app.route('/getcode', methods=['GET'])
 def get_code():
     sid = request.args.get('id')
@@ -221,11 +263,38 @@ def fetch_code_sync(sid, session_path):
         proxy = get_random_proxy()
         proxy_dict = create_proxy_dict(proxy) if proxy else None
 
-        client = TelegramClient(
-            session_path,
-            api=official_api,
-            proxy=proxy_dict
-        )
+        client = None
+        attempt = 0
+        while attempt < 2:
+            try:
+                client = TelegramClient(
+                    session_path,
+                    api=official_api,
+                    proxy=proxy_dict
+                )
+                break
+            except ValueError as e:
+                if "not enough values to unpack (expected 6, got 5)" in str(e) and attempt == 0:
+                    logger.warning(f"检测到 session 文件格式问题，尝试自动修复: {session_path}")
+                    if repair_session(session_path):
+                        logger.info(f"修复完成，重试创建客户端...")
+                        attempt += 1
+                        continue
+                    else:
+                        logger.error(f"自动修复失败，无法使用该 session")
+                        return None, None
+                elif "too many values to unpack (expected 6)" in str(e) and attempt == 0:
+                    logger.warning(f"检测到 session 文件列数过多，尝试自动修复: {session_path}")
+                    if repair_session(session_path):
+                        logger.info(f"修复完成，重试创建客户端...")
+                        attempt += 1
+                        continue
+                    else:
+                        logger.error(f"自动修复失败，无法使用该 session")
+                        return None, None
+                else:
+                    logger.error(f"创建 TelegramClient 失败: {e}")
+                    return None, None
 
         try:
             await client.connect()
