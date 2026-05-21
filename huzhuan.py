@@ -101,13 +101,34 @@ def get_total_size(path):
     return total
 
 def read_2fa_from_folder(folder_path: str) -> Optional[str]:
+    allowed_names = {'2fa', 'twofa', 'password'}
+    
     for file in os.listdir(folder_path):
-        if file.lower() in ['2fa.txt', '2fa', 'password.txt']:
+        name, ext = os.path.splitext(file)
+        if ext.lower() == '.txt' and name.lower() in allowed_names:
             try:
                 with open(os.path.join(folder_path, file), 'r', encoding='utf-8') as f:
                     return f.read().strip()
             except:
                 pass
+        elif not ext and file.lower() in allowed_names:
+            try:
+                with open(os.path.join(folder_path, file), 'r', encoding='utf-8') as f:
+                    return f.read().strip()
+            except:
+                pass
+    
+    for file in os.listdir(folder_path):
+        if file.lower().endswith('.json'):
+            try:
+                with open(os.path.join(folder_path, file), 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                    for key, value in data.items():
+                        if key.lower() in allowed_names and value:
+                            return str(value).strip()
+            except:
+                continue
+    
     return None
 
 def generate_non_linux_api():
@@ -143,10 +164,11 @@ async def convert_session_to_tdata(session_path: str, output_dir: str, twofa: Op
         os.makedirs(tdata_dir, exist_ok=True)
 
         tdesk.SaveTData(tdata_dir)
-
-        if twofa:
-            with open(os.path.join(account_dir, "2fa.txt"), 'w', encoding='utf-8') as f:
+        with open(os.path.join(account_dir, "2fa.txt"), 'w', encoding='utf-8') as f:
+            if twofa:
                 f.write(twofa)
+            else:
+                f.write("无2FA密码。")
 
         return True, account_name, account_dir
 
