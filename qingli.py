@@ -9,6 +9,7 @@ import random
 import struct
 import re
 import traceback
+import sqlite3
 from datetime import datetime
 from telethon import TelegramClient as TelethonClient
 from telethon.tl.functions import TLRequest
@@ -36,6 +37,47 @@ _proxy_list_last_load = 0
 PROXY_LIST_CACHE_TIME = 60
 
 user_clean_states = {}
+
+def repair_session(session_path):
+    if not os.path.exists(session_path):
+        return False
+
+    backup_path = session_path + ".bak"
+    try:
+        shutil.copy2(session_path, backup_path)
+        logger.info(f"已备份 {session_path} 到 {backup_path}")
+
+        conn = sqlite3.connect(session_path)
+        c = conn.cursor()
+        c.execute("PRAGMA table_info(sessions)")
+        existing_columns = [row[1] for row in c.fetchall()]
+        required_columns = ['dc_id', 'server_address', 'port', 'auth_key', 'takeout_id', 'tmp_auth_key']
+        if existing_columns == required_columns:
+            conn.close()
+            return True
+
+        c.execute("BEGIN TRANSACTION")
+        c.execute("CREATE TABLE sessions_new (dc_id INTEGER, server_address TEXT, port INTEGER, auth_key BLOB, takeout_id INTEGER, tmp_auth_key BLOB)")
+        select_cols = []
+        for col in required_columns:
+            if col in existing_columns:
+                select_cols.append(col)
+            else:
+                select_cols.append("NULL")
+        select_sql = f"SELECT {', '.join(select_cols)} FROM sessions"
+        c.execute(select_sql)
+        rows = c.fetchall()
+        for row in rows:
+            c.execute("INSERT INTO sessions_new VALUES (?,?,?,?,?,?)", row)
+        c.execute("DROP TABLE sessions")
+        c.execute("ALTER TABLE sessions_new RENAME TO sessions")
+        conn.commit()
+        conn.close()
+        logger.info(f"成功重建 {session_path} 的表结构，共迁移 {len(rows)} 行数据")
+        return True
+    except Exception as e:
+        logger.error(f"修复 {session_path} 失败: {e}")
+        return False
 
 class GetPasskeysManual(TLRequest):
     CONSTRUCTOR_ID = 0xea1f0c52
@@ -786,29 +828,56 @@ async def _process_clean_internal(update, context, zip_path, user_id, api_id, ap
                 system_version = json_config.get('system_version') or json_config.get('sdk') or None
                 lang_pack = json_config.get('lang_pack') or None
 
-                official_api = API.TelegramDesktop.Generate()
-                official_api.api_id = final_api_id
-                official_api.api_hash = final_api_hash
-                if device_model:
-                    official_api.device_model = device_model
-                if app_version:
-                    official_api.app_version = app_version
-                if system_lang_code:
-                    official_api.system_lang_code = system_lang_code
-                if system_version:
-                    official_api.system_version = system_version
-                if lang_pack:
-                    official_api.lang_pack = lang_pack
-                    official_api.lang_code = lang_pack
+                retry_count = 0
+                while retry_count < 2:
+                    try:
+                        official_api = API.TelegramDesktop.Generate()
+                        if device_model is None:
+                            max_attempts = 100
+                            attempt = 0
+                            while 'linux' in official_api.device_model.lower() and attempt < max_attempts:
+                                official_api = API.TelegramDesktop.Generate()
+                                attempt += 1
+                            if 'linux' in official_api.device_model.lower():
+                                official_api.device_model = "Desktop"
+                        else:
+                            official_api.device_model = device_model
 
-                proxy = get_random_proxy()
-                proxy_dict = create_proxy_dict(proxy) if proxy else None
+                        official_api.api_id = final_api_id
+                        official_api.api_hash = final_api_hash
+                        if app_version:
+                            official_api.app_version = app_version
+                        if system_lang_code:
+                            official_api.system_lang_code = system_lang_code
+                        if system_version:
+                            official_api.system_version = system_version
+                        if lang_pack:
+                            official_api.lang_pack = lang_pack
+                            official_api.lang_code = lang_pack
 
-                client = TelegramClient(
-                    session_file,
-                    api=official_api,
-                    proxy=proxy_dict
-                )
+                        proxy = get_random_proxy()
+                        proxy_dict = create_proxy_dict(proxy) if proxy else None
+
+                        client = TelegramClient(
+                            session_file,
+                            api=official_api,
+                            proxy=proxy_dict
+                        )
+                        break
+                    except ValueError as e:
+                        err_msg = str(e)
+                        if ("not enough values to unpack (expected 6, got 5)" in err_msg or
+                            "too many values to unpack (expected 6)" in err_msg) and retry_count == 0:
+                            logger.warning(f"检测到 session 文件格式问题: {session_file}，尝试自动修复")
+                            if repair_session(session_file):
+                                logger.info(f"修复完成，重试创建客户端")
+                                retry_count += 1
+                                continue
+                            else:
+                                logger.error(f"自动修复失败，无法使用该 session: {session_file}")
+                                raise Exception("Session文件损坏且修复失败")
+                        else:
+                            raise
 
                 await client.connect()
                 if not await client.is_user_authorized():
