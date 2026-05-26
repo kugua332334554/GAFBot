@@ -8,6 +8,7 @@ import json
 import base64
 import hashlib
 import cbor2
+import sqlite3
 from pathlib import Path
 from telethon.errors import FloodWaitError
 from datetime import datetime
@@ -35,6 +36,47 @@ load_dotenv()
 
 PASSKEY_BACK = os.getenv("PASSKEY_BACK", "🔑 <b>Passkey 功能管理</b>\n\n请选择您要执行的操作：").replace('\\n', '\n')
 user_passkey_states = {}
+
+def repair_session(session_path):
+    if not os.path.exists(session_path):
+        return False
+
+    backup_path = session_path + ".bak"
+    try:
+        shutil.copy2(session_path, backup_path)
+        logger.info(f"已备份 {session_path} 到 {backup_path}")
+
+        conn = sqlite3.connect(session_path)
+        c = conn.cursor()
+        c.execute("PRAGMA table_info(sessions)")
+        existing_columns = [row[1] for row in c.fetchall()]
+        required_columns = ['dc_id', 'server_address', 'port', 'auth_key', 'takeout_id', 'tmp_auth_key']
+        if existing_columns == required_columns:
+            conn.close()
+            return True
+
+        c.execute("BEGIN TRANSACTION")
+        c.execute("CREATE TABLE sessions_new (dc_id INTEGER, server_address TEXT, port INTEGER, auth_key BLOB, takeout_id INTEGER, tmp_auth_key BLOB)")
+        select_cols = []
+        for col in required_columns:
+            if col in existing_columns:
+                select_cols.append(col)
+            else:
+                select_cols.append("NULL")
+        select_sql = f"SELECT {', '.join(select_cols)} FROM sessions"
+        c.execute(select_sql)
+        rows = c.fetchall()
+        for row in rows:
+            c.execute("INSERT INTO sessions_new VALUES (?,?,?,?,?,?)", row)
+        c.execute("DROP TABLE sessions")
+        c.execute("ALTER TABLE sessions_new RENAME TO sessions")
+        conn.commit()
+        conn.close()
+        logger.info(f"成功重建 {session_path} 的表结构，共迁移 {len(rows)} 行数据")
+        return True
+    except Exception as e:
+        logger.error(f"修复 {session_path} 失败: {e}")
+        return False
 
 def get_random_proxy_dict():
     proxy_file = "proxy.txt"
@@ -238,30 +280,51 @@ async def generate_json_for_session(session_path, client, me, api_id, api_hash, 
 
 async def create_single_passkey(session_file, json_file, out_dir, api_id, api_hash):
     client = None
+    session_path_str = str(session_file)
+    retry_count = 0
+    while retry_count < 2:
+        try:
+            json_config = {}
+            if json_file and os.path.exists(json_file):
+                try:
+                    with open(json_file, 'r', encoding='utf-8') as f:
+                        json_config = json.load(f)
+                except:
+                    pass
+            final_api_id = int(json_config.get('app_id', json_config.get('api_id', api_id)))
+            final_api_hash = str(json_config.get('app_hash', json_config.get('api_hash', api_hash)))
+            keys_to_check = ['twofa', '2fa', 'password', '2FA', 'twoFA', 'Password']
+            twofa_pwd = ""
+            for key in keys_to_check:
+                val = json_config.get(key)
+                if val:
+                    twofa_pwd = str(val)
+                    break
+            official_api = API.TelegramDesktop.Generate()
+            official_api.api_id = final_api_id
+            official_api.api_hash = final_api_hash
+            if json_config.get('device_model'):
+                official_api.device_model = json_config['device_model']
+            proxy = get_random_proxy_dict()
+            client = TelegramClient(session_path_str, api=official_api, proxy=proxy)
+            break
+        except ValueError as e:
+            err_msg = str(e)
+            if ("not enough values to unpack (expected 6, got 5)" in err_msg or
+                "too many values to unpack (expected 6)" in err_msg) and retry_count == 0:
+                logger.warning(f"检测到 session 文件格式问题: {session_path_str}，尝试自动修复")
+                if repair_session(session_path_str):
+                    logger.info(f"修复完成，重试创建客户端")
+                    retry_count += 1
+                    continue
+                else:
+                    logger.error(f"自动修复失败，无法使用该 session: {session_path_str}")
+                    return False, "Session文件损坏且修复失败"
+            else:
+                return False, f"创建客户端失败: {err_msg[:30]}"
+        except Exception as ex:
+            return False, f"创建客户端异常: {str(ex)[:30]}"
     try:
-        json_config = {}
-        if json_file and os.path.exists(json_file):
-            try:
-                with open(json_file, 'r', encoding='utf-8') as f:
-                    json_config = json.load(f)
-            except:
-                pass
-        final_api_id = int(json_config.get('app_id', json_config.get('api_id', api_id)))
-        final_api_hash = str(json_config.get('app_hash', json_config.get('api_hash', api_hash)))
-        keys_to_check = ['twofa', '2fa', 'password', '2FA', 'twoFA', 'Password']
-        twofa_pwd = ""
-        for key in keys_to_check:
-            val = json_config.get(key)
-            if val:
-                twofa_pwd = str(val)
-                break
-        official_api = API.TelegramDesktop.Generate()
-        official_api.api_id = final_api_id
-        official_api.api_hash = final_api_hash
-        if json_config.get('device_model'):
-            official_api.device_model = json_config['device_model']
-        proxy = get_random_proxy_dict()
-        client = TelegramClient(str(session_file), api=official_api, proxy=proxy)
         await client.connect()
         if not await client.is_user_authorized():
             return False, "会话未授权/已掉线"
