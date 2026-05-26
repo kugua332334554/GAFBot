@@ -187,11 +187,40 @@ def generate_non_linux_api():
 
 async def convert_session_to_tdata(session_path: str, output_dir: str, twofa: Optional[str] = None) -> Tuple[bool, str, Optional[str]]:
     client = None
+    session_dir = os.path.dirname(session_path)
+    session_name = os.path.splitext(os.path.basename(session_path))[0]
+    json_path = os.path.join(session_dir, f"{session_name}.json")
+    
+    json_config = {}
+    if os.path.exists(json_path):
+        try:
+            with open(json_path, 'r', encoding='utf-8') as f:
+                json_config = json.load(f)
+        except Exception:
+            pass
+    
+    api_id_val = API_ID
+    api_hash_val = API_HASH
+    if json_config:
+        if 'app_id' in json_config and json_config['app_id']:
+            try:
+                api_id_val = int(json_config['app_id'])
+            except (ValueError, TypeError):
+                pass
+        if 'app_hash' in json_config and json_config['app_hash']:
+            api_hash_val = str(json_config['app_hash'])
+    
+    device_model = json_config.get('device_model') or None
+    app_version = json_config.get('app_version') or None
+    system_lang_code = json_config.get('system_lang_code') or None
+    system_vision = json_config.get('system_version') or json_config.get('sdk') or None
+    lang_pack = json_config.get('lang_pack') or None
+    
     retry_count = 0
     while retry_count < 2:
         try:
             official_api = API.TelegramDesktop.Generate()
-            if 'linux' in official_api.device_model.lower():
+            if device_model is None:
                 max_attempts = 100
                 attempt = 0
                 while 'linux' in official_api.device_model.lower() and attempt < max_attempts:
@@ -199,9 +228,20 @@ async def convert_session_to_tdata(session_path: str, output_dir: str, twofa: Op
                     attempt += 1
                 if 'linux' in official_api.device_model.lower():
                     official_api.device_model = "Desktop"
-
-            official_api.api_id = API_ID
-            official_api.api_hash = API_HASH
+            else:
+                official_api.device_model = device_model
+            
+            official_api.api_id = api_id_val
+            official_api.api_hash = api_hash_val
+            if app_version:
+                official_api.app_version = app_version
+            if system_lang_code:
+                official_api.system_lang_code = system_lang_code
+            if system_vision:
+                official_api.system_version = system_vision
+            if lang_pack:
+                official_api.lang_pack = lang_pack
+                official_api.lang_code = lang_pack
 
             client = TelegramClient(session_path, api=official_api)
             break
