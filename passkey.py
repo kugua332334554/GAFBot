@@ -151,6 +151,13 @@ def read_2fa_from_folder(folder_path: str):
                 pass
     return None
 
+def safe_extract(zip_ref, target_dir):
+    for member in zip_ref.infolist():
+        member_path = os.path.normpath(member.filename)
+        if member_path.startswith(('..', '/', '\\')):
+            raise Exception(f"非法路径: {member.filename}")
+        zip_ref.extract(member, target_dir)
+
 async def convert_tdata_to_session_with_proxy(tdata_dir, output_dir, twofa, proxy_dict):
     API_ID = int(os.getenv("TELEGRAM_APP_ID", "2040"))
     API_HASH = os.getenv("TELEGRAM_APP_HASH", "b18441a1ff607e10a989891a5462e627")
@@ -545,7 +552,7 @@ async def process_passkey_create(update, context, zip_path, user_id, status_msg)
         os.makedirs(out_dir, exist_ok=True)
         try:
             with zipfile.ZipFile(zip_path, 'r') as zip_ref:
-                zip_ref.extractall(extract_dir)
+                safe_extract(zip_ref, extract_dir)
         except Exception as e:
             await context.bot.send_message(chat_id=update.effective_chat.id, text=f"<tg-emoji emoji-id='5886496611835581345'>❌</tg-emoji> 解压失败: {str(e)}", parse_mode='HTML')
             return
@@ -634,7 +641,7 @@ async def process_passkey_login(update, context, zip_path, user_id, status_msg):
         os.makedirs(out_dir, exist_ok=True)
         try:
             with zipfile.ZipFile(zip_path, 'r') as zip_ref:
-                zip_ref.extractall(extract_dir)
+                safe_extract(zip_ref, extract_dir)
         except Exception as e:
             await context.bot.send_message(chat_id=update.effective_chat.id, text=f"<tg-emoji emoji-id='5886496611835581345'>❌</tg-emoji> 解压失败: {str(e)}", parse_mode='HTML')
             return
