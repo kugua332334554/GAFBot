@@ -8,6 +8,7 @@ import asyncio
 import random
 import traceback
 import sqlite3
+import logging
 from datetime import datetime
 from opentele.tl import TelegramClient
 from opentele.api import API
@@ -21,6 +22,7 @@ from telegram.ext import ContextTypes
 from dotenv import load_dotenv
 
 load_dotenv()
+logger = logging.getLogger(__name__)
 
 CHECK_MATERIAL_BACK = os.getenv("CHECK_MATERIAL_BACK", "").replace('\\n', '\n')
 MAX_EXTRACT_SIZE = int(os.getenv("MK_TIME", 4)) * 1024 * 1024
@@ -144,6 +146,13 @@ def create_back_button():
         "返回主菜单", 
         callback_data="back_to_main"
     ).to_dict() | {"icon_custom_emoji_id": BACK_BUTTON_EMOJI_ID}
+
+def safe_extract(zip_ref, target_dir):
+    for member in zip_ref.infolist():
+        member_path = os.path.normpath(member.filename)
+        if member_path.startswith(('..', '/', '\\')):
+            raise Exception(f"非法路径: {member.filename}")
+        zip_ref.extract(member, target_dir)
 
 async def show_material_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -617,7 +626,7 @@ async def _process_material_internal(update, context, zip_path, user_id, api_id,
         
         try:
             with zipfile.ZipFile(zip_path, 'r') as zip_ref:
-                zip_ref.extractall(extract_dir)
+                safe_extract(zip_ref, extract_dir)
                 extracted_size = get_total_size(extract_dir)
                 if extracted_size > MAX_EXTRACT_SIZE:
                     raise Exception(f"解压后文件过大 ({extracted_size//1024//1024}MB > {MAX_EXTRACT_SIZE//1024//1024}MB)")
