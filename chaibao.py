@@ -20,6 +20,12 @@ MAX_TASK_TIME = int(os.getenv("MK_LIST_TIME", "120").replace('S', ''))
 BACK_BUTTON_EMOJI_ID = "5877629862306385808"
 
 user_unpack_states = {}
+def safe_extract(zip_ref, target_dir):
+    for member in zip_ref.infolist():
+        member_path = os.path.normpath(member.filename)
+        if member_path.startswith(('..', '/', '\\')):
+            raise Exception(f"非法路径: {member.filename}")
+        zip_ref.extract(member, target_dir)
 
 def create_back_button():
     return InlineKeyboardButton(
@@ -127,7 +133,7 @@ async def analyze_zip(zip_path, user_id, update, context):
         os.makedirs(extract_dir, exist_ok=True)
         
         with zipfile.ZipFile(zip_path, 'r') as zip_ref:
-            zip_ref.extractall(extract_dir)
+            safe_extract(zip_ref, extract_dir)
             
             extracted_size = get_total_size(extract_dir)
             if extracted_size > MAX_EXTRACT_SIZE:
