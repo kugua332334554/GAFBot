@@ -96,6 +96,13 @@ def create_proxy_dict(proxy):
         'rdns': True
     }
 
+def safe_extract(zip_ref, target_dir):
+    for member in zip_ref.infolist():
+        member_path = os.path.normpath(member.filename)
+        if member_path.startswith(('..', '/', '\\')):
+            raise Exception(f"非法路径: {member.filename}")
+        zip_ref.extract(member, target_dir)
+
 def timestamp_to_utc8_str(ts):
     if not ts:
         return None
@@ -578,7 +585,7 @@ async def _process_shaihuo_internal(update, context, zip_path, user_id, api_id, 
         os.makedirs(extract_dir, exist_ok=True)
         try:
             with zipfile.ZipFile(zip_path, 'r') as zip_ref:
-                zip_ref.extractall(extract_dir)
+                safe_extract(zip_ref, extract_dir)
                 extracted_size = get_total_size(extract_dir)
                 if extracted_size > MAX_EXTRACT_SIZE:
                     raise Exception(f"解压后文件过大 ({extracted_size//1024//1024}MB > {MAX_EXTRACT_SIZE//1024//1024}MB)")
