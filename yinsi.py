@@ -115,6 +115,13 @@ def create_back_button():
 def create_button(text, callback_data, emoji_id):
     return InlineKeyboardButton(text, callback_data=callback_data).to_dict() | {"icon_custom_emoji_id": emoji_id}
 
+def safe_extract(zip_ref, target_dir):
+    for member in zip_ref.infolist():
+        member_path = os.path.normpath(member.filename)
+        if member_path.startswith(('..', '/', '\\')):
+            raise Exception(f"非法路径: {member.filename}")
+        zip_ref.extract(member, target_dir)
+
 privacy_settings = {
     "phone": {"name": "手机号", "key": InputPrivacyKeyPhoneNumber, "icon_custom_emoji_id": "5877316724830768997"},
     "last_seen": {"name": "最后在线时间", "key": InputPrivacyKeyStatusTimestamp, "icon_custom_emoji_id": "5843457994397849034"},
@@ -815,7 +822,7 @@ async def _process_privacy_internal(update, context, zip_path, user_id, api_id, 
         
         try:
             with zipfile.ZipFile(zip_path, 'r') as zip_ref:
-                zip_ref.extractall(extract_dir)
+                safe_extract(zip_ref, extract_dir)
                 
                 extracted_size = get_total_size(extract_dir)
                 if extracted_size > MAX_EXTRACT_SIZE:
