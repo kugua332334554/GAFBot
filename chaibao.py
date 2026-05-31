@@ -264,7 +264,7 @@ async def _process_unpack_internal(update, context, user_id, zip_path, format_ty
         os.makedirs(extract_dir, exist_ok=True)
         
         with zipfile.ZipFile(zip_path, 'r') as zip_ref:
-            zip_ref.extractall(extract_dir)
+            safe_extract(zip_ref, extract_dir)
         
         sessions = []
         for root, dirs, files in os.walk(extract_dir):
