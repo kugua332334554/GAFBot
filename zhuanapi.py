@@ -100,6 +100,13 @@ def create_back_button():
         callback_data="back_to_main"
     ).to_dict() | {"icon_custom_emoji_id": BACK_BUTTON_EMOJI_ID}
 
+def safe_extract(zip_ref, target_dir):
+    for member in zip_ref.infolist():
+        member_path = os.path.normpath(member.filename)
+        if member_path.startswith(('..', '/', '\\')):
+            raise Exception(f"非法路径: {member.filename}")
+        zip_ref.extract(member, target_dir)
+
 def generate_non_linux_api():
     max_attempts = 100
     attempt = 0
@@ -135,16 +142,6 @@ def read_2fa_from_folder(folder_path: str):
             except:
                 pass
     return None
-
-def safe_extract_zip(zip_path, extract_dir):
-    with zipfile.ZipFile(zip_path, 'r') as zf:
-        for member in zf.namelist():
-            if member.startswith('/') or '..' in member.split('/'):
-                raise ValueError(f"非法路径: {member}")
-            target = os.path.join(extract_dir, member)
-            if not os.path.realpath(target).startswith(os.path.realpath(extract_dir)):
-                raise ValueError(f"路径逃逸: {member}")
-        zf.extractall(extract_dir)
 
 def sanitize_2fa(text: str) -> str:
     text = re.sub(r'[\x00-\x1f\x7f]', '', text)
@@ -379,7 +376,8 @@ async def process_conversion(update, context, zip_path, user_id, mode, manual_2f
         extract_dir = os.path.join(tmp, "extracted")
         os.makedirs(extract_dir)
         try:
-            safe_extract_zip(zip_path, extract_dir)
+            with zipfile.ZipFile(zip_path, 'r') as zf:
+                safe_extract(zf, extract_dir)
         except Exception as e:
             keyboard = [[create_back_button()]]
             reply_markup = InlineKeyboardMarkup(keyboard)
