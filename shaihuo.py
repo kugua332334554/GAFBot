@@ -30,7 +30,6 @@ _proxy_list_last_load = 0
 PROXY_LIST_CACHE_TIME = 60
 
 def log_time(msg):
-    """输出带毫秒时间戳的日志"""
     logger.info(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]}] {msg}")
 
 def load_proxies():
