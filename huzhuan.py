@@ -28,6 +28,9 @@ API_HASH = os.getenv("TELEGRAM_APP_HASH", "b18441a1ff607e10a989891a5462e627")
 
 user_convert_states = {}
 
+def log_time(msg):
+    logger.info(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]}] {msg}")
+
 def repair_session(session_path):
     if not os.path.exists(session_path):
         return False
@@ -193,6 +196,20 @@ def generate_non_linux_api():
     return api
 
 async def convert_session_to_tdata(session_path: str, output_dir: str, twofa: Optional[str] = None) -> Tuple[bool, str, Optional[str]]:
+    start_time = time.time()
+    log_time(f"开始转换 session 到 tdata: {session_path}")
+    
+    temp_dir = tempfile.mkdtemp(prefix="huzhuan_temp_")
+    temp_session = os.path.join(temp_dir, os.path.basename(session_path))
+    try:
+        shutil.copy2(session_path, temp_session)
+        log_time(f"已创建临时 session 副本: {temp_session}")
+        use_session = temp_session
+    except Exception as e:
+        log_time(f"复制 session 到临时目录失败: {e}，将使用原文件")
+        use_session = session_path
+        temp_dir = None
+    
     client = None
     session_dir = os.path.dirname(session_path)
     session_name = os.path.splitext(os.path.basename(session_path))[0]
@@ -250,19 +267,25 @@ async def convert_session_to_tdata(session_path: str, output_dir: str, twofa: Op
                 official_api.lang_pack = lang_pack
                 official_api.lang_code = lang_pack
 
-            client = TelegramClient(session_path, api=official_api)
+            client = TelegramClient(
+                use_session,
+                api=official_api,
+                receive_updates=False,
+                timeout=10,
+                connection_retries=1
+            )
             break
         except ValueError as e:
             err_msg = str(e)
             if ("not enough values to unpack (expected 6, got 5)" in err_msg or
                 "too many values to unpack (expected 6)" in err_msg) and retry_count == 0:
-                logger.warning(f"检测到 session 文件格式问题: {session_path}，尝试自动修复")
-                if repair_session(session_path):
+                logger.warning(f"检测到 session 文件格式问题: {use_session}，尝试自动修复")
+                if repair_session(use_session):
                     logger.info(f"修复完成，重试创建客户端")
                     retry_count += 1
                     continue
                 else:
-                    logger.error(f"自动修复失败，无法使用该 session: {session_path}")
+                    logger.error(f"自动修复失败，无法使用该 session: {use_session}")
                     return False, f"Session文件损坏且修复失败", None
             else:
                 return False, f"创建客户端失败: {err_msg[:30]}", None
@@ -270,14 +293,20 @@ async def convert_session_to_tdata(session_path: str, output_dir: str, twofa: Op
             return False, f"创建客户端异常: {str(ex)[:30]}", None
 
     try:
-        await client.connect()
-
-        if not await client.is_user_authorized():
+        connect_start = time.time()
+        await asyncio.wait_for(client.connect(), timeout=15)
+        log_time(f"连接耗时: {time.time() - connect_start:.2f}秒")
+        
+        auth_start = time.time()
+        if not await asyncio.wait_for(client.is_user_authorized(), timeout=10):
             return False, "session未授权", None
-
-        me = await client.get_me()
+        log_time(f"授权检查耗时: {time.time() - auth_start:.2f}秒")
+        
+        me_start = time.time()
+        me = await asyncio.wait_for(client.get_me(), timeout=10)
         if not me:
             return False, "无法获取用户信息", None
+        log_time(f"获取用户信息耗时: {time.time() - me_start:.2f}秒")
 
         tdesk = await client.ToTDesktop(flag=UseCurrentSession)
 
@@ -293,15 +322,27 @@ async def convert_session_to_tdata(session_path: str, output_dir: str, twofa: Op
             else:
                 f.write("无2FA密码。")
 
+        total_time = time.time() - start_time
+        log_time(f"Session 转 Tdata 成功: {session_path} -> {account_name}，耗时 {total_time:.2f}秒")
         return True, account_name, account_dir
 
+    except asyncio.TimeoutError:
+        return False, "网络操作超时", None
     except Exception as e:
         return False, str(e), None
     finally:
         if client:
+            disconnect_start = time.time()
             await client.disconnect()
+            log_time(f"断开连接耗时: {time.time() - disconnect_start:.2f}秒")
+        if temp_dir and os.path.exists(temp_dir):
+            shutil.rmtree(temp_dir, ignore_errors=True)
+            log_time(f"已清理临时目录: {temp_dir}")
 
 async def convert_tdata_to_session(tdata_dir: str, output_dir: str, twofa: Optional[str] = None) -> Tuple[bool, str, Optional[str]]:
+    start_time = time.time()
+    log_time(f"开始转换 tdata 到 session: {tdata_dir}")
+    client = None
     try:
         tdesk = TDesktop(tdata_dir)
         if not tdesk.isLoaded():
@@ -312,13 +353,20 @@ async def convert_tdata_to_session(tdata_dir: str, output_dir: str, twofa: Optio
 
         client = await tdesk.ToTelethon(session=session_path, flag=UseCurrentSession)
 
-        await client.connect()
-        if not await client.is_user_authorized():
+        connect_start = time.time()
+        await asyncio.wait_for(client.connect(), timeout=15)
+        log_time(f"连接耗时: {time.time() - connect_start:.2f}秒")
+        
+        auth_start = time.time()
+        if not await asyncio.wait_for(client.is_user_authorized(), timeout=10):
             return False, "会话未授权", None
-
-        me = await client.get_me()
+        log_time(f"授权检查耗时: {time.time() - auth_start:.2f}秒")
+        
+        me_start = time.time()
+        me = await asyncio.wait_for(client.get_me(), timeout=10)
         if not me:
             return False, "无法获取用户信息", None
+        log_time(f"获取用户信息耗时: {time.time() - me_start:.2f}秒")
 
         phone = me.phone
         if not phone:
@@ -373,11 +421,19 @@ async def convert_tdata_to_session(tdata_dir: str, output_dir: str, twofa: Optio
         with open(json_path, 'w', encoding='utf-8') as f:
             json.dump(json_data, f, ensure_ascii=False, indent=2)
 
-        await client.disconnect()
+        total_time = time.time() - start_time
+        log_time(f"Tdata 转 Session 成功: {tdata_dir} -> {phone}，耗时 {total_time:.2f}秒")
         return True, phone, output_dir
 
+    except asyncio.TimeoutError:
+        return False, "网络操作超时", None
     except Exception as e:
         return False, str(e), None
+    finally:
+        if client:
+            disconnect_start = time.time()
+            await client.disconnect()
+            log_time(f"断开连接耗时: {time.time() - disconnect_start:.2f}秒")
 
 async def handle_convert_document(update: Update, context: ContextTypes.DEFAULT_TYPE, user_id: str):
     document = update.message.document
@@ -535,6 +591,7 @@ async def process_session_to_tdata(update: Update, context: ContextTypes.DEFAULT
                     )
                 except:
                     pass
+            await asyncio.sleep(0.1)
 
         try:
             await status_msg.delete()
@@ -689,6 +746,7 @@ async def process_tdata_to_session(update: Update, context: ContextTypes.DEFAULT
                     )
                 except:
                     pass
+            await asyncio.sleep(0.1)
 
         try:
             await status_msg.delete()
