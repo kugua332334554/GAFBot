@@ -29,10 +29,15 @@ _proxy_list = None
 _proxy_list_last_load = 0
 PROXY_LIST_CACHE_TIME = 60
 
+def log_time(msg):
+    """输出带毫秒时间戳的日志"""
+    logger.info(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]}] {msg}")
+
 def load_proxies():
     global _proxy_list, _proxy_list_last_load
     current_time = time.time()
     if _proxy_list is not None and (current_time - _proxy_list_last_load) < PROXY_LIST_CACHE_TIME:
+        log_time("使用缓存的代理列表")
         return _proxy_list
 
     proxy_file = "proxy.txt"
@@ -77,7 +82,7 @@ def load_proxies():
 
     _proxy_list = valid_proxies
     _proxy_list_last_load = current_time
-    logger.info(f"加载了 {len(valid_proxies)} 个有效代理")
+    log_time(f"加载了 {len(valid_proxies)} 个有效代理")
     return valid_proxies
 
 def get_random_proxy():
@@ -206,6 +211,21 @@ async def generate_json_for_session(session_file, client, me, api_id, api_hash, 
         return None
 
 async def check_session_alive(session_file, json_file, api_id, api_hash):
+    start_time = time.time()
+    log_time(f"开始检查 session: {os.path.basename(session_file)}")
+    
+    # 创建临时 session 副本，避免文件锁冲突
+    temp_dir = tempfile.mkdtemp(prefix="shaihuo_temp_")
+    temp_session = os.path.join(temp_dir, os.path.basename(session_file))
+    try:
+        shutil.copy2(session_file, temp_session)
+        log_time(f"已创建临时 session 副本: {temp_session}")
+        use_session = temp_session
+    except Exception as e:
+        log_time(f"复制 session 到临时目录失败: {e}，将使用原文件")
+        use_session = session_file
+        temp_dir = None  # 标记未创建临时目录
+    
     client = None
     proxy_to_use = None
     json_config = {}
@@ -267,38 +287,54 @@ async def check_session_alive(session_file, json_file, api_id, api_hash):
             try:
                 proxy = get_random_proxy()
                 proxy_to_use = create_proxy_dict(proxy) if proxy else None
+                if proxy_to_use:
+                    log_time(f"使用代理 {proxy['ip']}:{proxy['port']} 检查账号")
+                else:
+                    log_time("直连检查账号")
 
                 client = TelegramClient(
-                    session_file,
+                    use_session,
                     api=official_api,
                     proxy=proxy_to_use,
-                    receive_updates=False
+                    receive_updates=False,
+                    timeout=10,
+                    connection_retries=1
                 )
                 break
             except ValueError as e:
                 err_msg = str(e)
                 if ("not enough values to unpack (expected 6, got 5)" in err_msg or
                     "too many values to unpack (expected 6)" in err_msg) and retry_count == 0:
-                    logger.warning(f"检测到 session 文件格式问题: {session_file}，尝试自动修复")
-                    if repair_session(session_file):
+                    logger.warning(f"检测到 session 文件格式问题: {use_session}，尝试自动修复")
+                    if repair_session(use_session):
                         logger.info(f"修复完成，重试创建客户端")
                         retry_count += 1
                         continue
                     else:
-                        logger.error(f"自动修复失败，无法使用该 session: {session_file}")
+                        logger.error(f"自动修复失败，无法使用该 session: {use_session}")
                         return 'dead', f"Session文件损坏且修复失败", final_json_file, None
                 else:
                     return 'dead', f"创建客户端失败: {err_msg[:30]}", final_json_file, None
             except Exception as ex:
                 return 'dead', f"创建客户端异常: {str(ex)[:30]}", final_json_file, None
 
-        await client.connect()
-        if not await client.is_user_authorized():
+        # 连接
+        connect_start = time.time()
+        await asyncio.wait_for(client.connect(), timeout=15)
+        log_time(f"连接耗时: {time.time() - connect_start:.2f}秒")
+        
+        # 授权检查
+        auth_start = time.time()
+        if not await asyncio.wait_for(client.is_user_authorized(), timeout=10):
             return 'dead', "未授权", final_json_file, None
+        log_time(f"授权检查耗时: {time.time() - auth_start:.2f}秒")
 
-        me = await client.get_me()
+        # 获取本人信息
+        me_start = time.time()
+        me = await asyncio.wait_for(client.get_me(), timeout=10)
         if not me:
             return 'dead', "无法获取用户信息", final_json_file, None
+        log_time(f"获取用户信息耗时: {time.time() - me_start:.2f}秒")
 
         if not final_json_file:
             generated_path = await generate_json_for_session(
@@ -307,12 +343,13 @@ async def check_session_alive(session_file, json_file, api_id, api_hash):
             if generated_path:
                 final_json_file = generated_path
 
+        # 获取冻结配置
+        config_start = time.time()
         try:
-            app_config = await client(GetAppConfigRequest(hash=0))
+            app_config = await asyncio.wait_for(client(GetAppConfigRequest(hash=0)), timeout=10)
             config_json = json.loads(app_config.to_json())
             freeze_info = None
-            freeze_since = None
-            freeze_until = None
+            freeze_since = freeze_until = None
 
             for item in config_json.get('config', {}).get('value', []):
                 key = item.get('key')
@@ -330,23 +367,48 @@ async def check_session_alive(session_file, json_file, api_id, api_hash):
                     'since': timestamp_to_utc8_str(freeze_since),
                     'until': timestamp_to_utc8_str(freeze_until)
                 }
-                return 'frozen', "账号被冻结", final_json_file, freeze_info
+                status = 'frozen'
+                reason = "账号被冻结"
             else:
-                return 'alive', "存活", final_json_file, None
-
+                status = 'alive'
+                reason = "存活"
+            log_time(f"获取配置耗时: {time.time() - config_start:.2f}秒")
+        except asyncio.TimeoutError:
+            logger.error("获取 AppConfig 超时")
+            status = 'dead'
+            reason = "配置获取超时"
+            freeze_info = None
         except Exception as e:
             logger.error(f"获取 AppConfig 失败: {e}")
-            return 'dead', f"配置获取错误: {str(e)[:20]}", final_json_file, None
+            status = 'dead'
+            reason = f"配置获取错误: {str(e)[:20]}"
+            freeze_info = None
 
+        total_time = time.time() - start_time
+        log_time(f"账号 {os.path.basename(session_file)} 检查完成，状态={status}，总耗时={total_time:.2f}秒")
+        return status, reason, final_json_file, freeze_info
+
+    except asyncio.TimeoutError:
+        log_time(f"账号 {os.path.basename(session_file)} 网络操作超时")
+        return 'dead', "网络超时", final_json_file, None
     except SessionPasswordNeededError:
+        log_time(f"账号 {os.path.basename(session_file)} 需要2FA")
         return 'dead', "2FA验证", final_json_file, None
     except FloodWaitError as e:
+        log_time(f"账号 {os.path.basename(session_file)} Flood等待{e.seconds}秒")
         return 'dead', f"等待{e.seconds}秒", final_json_file, None
     except Exception as e:
+        log_time(f"账号 {os.path.basename(session_file)} 异常: {str(e)[:50]}")
         return 'dead', f"错误:{str(e)[:20]}", final_json_file, None
     finally:
         if client:
+            disconnect_start = time.time()
             await client.disconnect()
+            log_time(f"断开连接耗时: {time.time() - disconnect_start:.2f}秒")
+        # 清理临时 session 副本
+        if temp_dir and os.path.exists(temp_dir):
+            shutil.rmtree(temp_dir, ignore_errors=True)
+            log_time(f"已清理临时目录: {temp_dir}")
 
 def get_total_size(path):
     total = 0
@@ -394,6 +456,8 @@ def find_tdata_folders(root_dir):
     return list(tdata_dirs)
 
 async def convert_tdata_to_session_with_proxy(tdata_dir, output_dir, twofa, proxy_dict):
+    start_time = time.time()
+    log_time(f"开始转换 tdata: {tdata_dir}")
     API_ID = int(os.getenv("TELEGRAM_APP_ID", "2040"))
     API_HASH = os.getenv("TELEGRAM_APP_HASH", "b18441a1ff607e10a989891a5462e627")
 
@@ -473,9 +537,13 @@ async def convert_tdata_to_session_with_proxy(tdata_dir, output_dir, twofa, prox
             json.dump(json_data, f, ensure_ascii=False, indent=2)
 
         await client.disconnect()
+        elapsed = time.time() - start_time
+        log_time(f"tdata 转换成功: {tdata_dir} -> {phone}，耗时 {elapsed:.2f}秒")
         return True, phone, final_session, json_path, None
 
     except Exception as e:
+        elapsed = time.time() - start_time
+        log_time(f"tdata 转换失败 {tdata_dir}: {e}，耗时 {elapsed:.2f}秒")
         logger.error(f"转换 tdata 失败 {tdata_dir}: {e}")
         return False, None, None, None, str(e)
 
@@ -580,15 +648,18 @@ async def _process_shaihuo_internal(update, context, zip_path, user_id, api_id, 
     from telegram import InlineKeyboardMarkup
     from bot import create_back_button
 
+    log_time(f"开始处理筛活任务，用户={user_id}，文件={zip_path}")
     with tempfile.TemporaryDirectory() as temp_dir:
         extract_dir = os.path.join(temp_dir, "extracted")
         os.makedirs(extract_dir, exist_ok=True)
+        extract_start = time.time()
         try:
             with zipfile.ZipFile(zip_path, 'r') as zip_ref:
                 safe_extract(zip_ref, extract_dir)
                 extracted_size = get_total_size(extract_dir)
                 if extracted_size > MAX_EXTRACT_SIZE:
                     raise Exception(f"解压后文件过大 ({extracted_size//1024//1024}MB > {MAX_EXTRACT_SIZE//1024//1024}MB)")
+            log_time(f"解压完成，耗时 {time.time() - extract_start:.2f}秒，大小 {extracted_size//1024}KB")
         except Exception as e:
             keyboard = [[create_back_button()]]
             reply_markup = InlineKeyboardMarkup(keyboard)
@@ -608,6 +679,7 @@ async def _process_shaihuo_internal(update, context, zip_path, user_id, api_id, 
 
         accounts = []
         if session_files:
+            log_time(f"发现 {len(session_files)} 个 .session 文件")
             for sess in session_files:
                 session_name = os.path.splitext(os.path.basename(sess))[0]
                 json_file = os.path.join(os.path.dirname(sess), f"{session_name}.json")
@@ -627,6 +699,7 @@ async def _process_shaihuo_internal(update, context, zip_path, user_id, api_id, 
                 )
                 return
 
+            log_time(f"发现 {len(tdata_dirs)} 个 tdata 文件夹，开始转换")
             status_msg = await context.bot.send_message(
                 chat_id=update.effective_chat.id,
                 text=f"""<tg-emoji emoji-id="5942826671290715541">🔄</tg-emoji> <b>检测到tdata，正在转换为session...</b>
@@ -686,6 +759,7 @@ async def _process_shaihuo_internal(update, context, zip_path, user_id, api_id, 
                 )
                 return
 
+        log_time(f"共获取 {len(accounts)} 个有效账号，开始筛活检查")
         status_msg = await context.bot.send_message(
             chat_id=update.effective_chat.id,
             text=f"""<tg-emoji emoji-id="5942826671290715541">🔍</tg-emoji> <b>筛活进行中</b>
@@ -705,11 +779,15 @@ async def _process_shaihuo_internal(update, context, zip_path, user_id, api_id, 
         alive_count = 0
         frozen_count = 0
         dead_count = 0
+        total_accounts = len(accounts)
 
         for i, (phone, session_file, json_file, tdata_dir) in enumerate(accounts, 1):
+            account_start = time.time()
             status, reason, final_json_file, freeze_info = await check_session_alive(
                 session_file, json_file, api_id, api_hash
             )
+            account_elapsed = time.time() - account_start
+            log_time(f"账号 {phone} 处理完成，状态={status}，耗时={account_elapsed:.2f}秒")
 
             if status == 'alive':
                 target_dir = os.path.join(alive_dir, phone)
@@ -737,20 +815,21 @@ async def _process_shaihuo_internal(update, context, zip_path, user_id, api_id, 
                     f.write(f"冻结开始时间: {freeze_info['since']}\n")
                     f.write(f"冻结结束时间: {freeze_info['until']}\n")
 
-            if i % 5 == 0 or i == len(accounts):
+            if i % 5 == 0 or i == total_accounts:
                 try:
                     await status_msg.edit_text(
                         text=f"""<tg-emoji emoji-id="5942826671290715541">🔍</tg-emoji> <b>筛活进行中</b>
 
-进度: {i}/{len(accounts)}
+进度: {i}/{total_accounts}
 <tg-emoji emoji-id="5920052658743283381">✅</tg-emoji>存活: {alive_count} | <tg-emoji emoji-id="5985347654974967782">❄️</tg-emoji>冻结: {frozen_count} | <tg-emoji emoji-id="5922712343011135025">❌</tg-emoji>失效: {dead_count}""",
                         parse_mode='HTML'
                     )
                 except:
                     pass
 
-            await asyncio.sleep(0.5)
+            await asyncio.sleep(0.1)
 
+        # 打包结果
         alive_zip = os.path.join(temp_dir, "alive.zip")
         if alive_count > 0:
             with zipfile.ZipFile(alive_zip, 'w') as zipf:
@@ -781,7 +860,7 @@ async def _process_shaihuo_internal(update, context, zip_path, user_id, api_id, 
         result_text = f"""<tg-emoji emoji-id="5845955401916355857">✅</tg-emoji> <b>筛活完成</b>
 
 <tg-emoji emoji-id="5931472654660800739">📊</tg-emoji> 统计结果:
-• <tg-emoji emoji-id="5879770735999717115">👤</tg-emoji> 总账号: <b>{len(accounts)}</b>
+• <tg-emoji emoji-id="5879770735999717115">👤</tg-emoji> 总账号: <b>{total_accounts}</b>
 • <tg-emoji emoji-id="5920052658743283381">✅</tg-emoji> 存活: <b>{alive_count}</b>
 • <tg-emoji emoji-id="5985347654974967782">❄️</tg-emoji> 冻结: <b>{frozen_count}</b>
 • <tg-emoji emoji-id="5922712343011135025">❌</tg-emoji> 失效: <b>{dead_count}</b>"""
@@ -846,7 +925,7 @@ async def _process_shaihuo_internal(update, context, zip_path, user_id, api_id, 
                     text=f"""<tg-emoji emoji-id="5771695636411847302">📢</tg-emoji> <b>筛活任务完成</b>
 
 <tg-emoji emoji-id="5879770735999717115">👤</tg-emoji> 用户: <code>{user_id}</code>
-<tg-emoji emoji-id="5764747792371160364">📊</tg-emoji> 总账号: <b>{len(accounts)}</b>
+<tg-emoji emoji-id="5764747792371160364">📊</tg-emoji> 总账号: <b>{total_accounts}</b>
 <tg-emoji emoji-id="5920052658743283381">✅</tg-emoji> 存活: <b>{alive_count}</b>
 <tg-emoji emoji-id="5985347654974967782">❄️</tg-emoji> 冻结: <b>{frozen_count}</b>
 <tg-emoji emoji-id="5922712343011135025">❌</tg-emoji> 失效: <b>{dead_count}</b>""",
@@ -889,3 +968,4 @@ async def _process_shaihuo_internal(update, context, zip_path, user_id, api_id, 
             await status_msg.delete()
         except:
             pass
+        log_time(f"筛活任务完全结束，总账号数={total_accounts}，存活={alive_count}，冻结={frozen_count}，失效={dead_count}")
