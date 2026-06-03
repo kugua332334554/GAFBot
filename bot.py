@@ -12,7 +12,7 @@ from telegram.constants import ParseMode, ChatMemberStatus
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes, MessageHandler, filters, CallbackQueryHandler
 from pay import OkayPay, add_order, remove_order, cleanup_expired_orders, ORDER_TIMEOUT, load_all_users, save_all_users
 from shaihuo import process_shaihuo, handle_shaihuo_document, SHAIHUO_BACK
-from login import LoginHandler, ACCOUNT_LOGIN_BACK
+from login import LoginHandler, QrLoginHandler, ACCOUNT_LOGIN_BACK
 from xiugai2fa import (
     show_2fa_menu, handle_2fa_mode_selection, handle_2fa_text_input, 
     handle_2fa_document, CHANGE_2FA_BACK
@@ -75,6 +75,7 @@ logger = logging.getLogger(__name__)
 
 user_states = {}
 login_handlers = {}
+user_qr_handlers = {}
 user_queues = defaultdict(Queue)
 user_tasks = {} 
 queue_locks = defaultdict(asyncio.Lock)
@@ -188,40 +189,57 @@ async def process_button_callback(update: Update, context: ContextTypes.DEFAULT_
     query = update.callback_query
     user_id = str(query.from_user.id)
     data = query.data
-    
+
     await query.answer()
-    
+
     all_users = load_all_users()
     user_data = all_users.get(user_id, {})
-    
+
     if user_data.get("status") != "vip" and data not in ["back_to_main"]:
         await query.edit_message_text(
             text=UN_ACTIVE_MSG,
             parse_mode=ParseMode.HTML
         )
         return
-    
+
     if data == "back_to_main":
         await start(update, context)
         return
-    
+
     if data == "check_active":
         formatted_text = SHAIHUO_BACK.replace('\\n', '\n') if isinstance(SHAIHUO_BACK, str) else SHAIHUO_BACK
         keyboard = [[create_back_button()]]
         reply_markup = InlineKeyboardMarkup(keyboard)
-        
+
         await query.edit_message_text(
             text=formatted_text,
             parse_mode=ParseMode.HTML,
             reply_markup=reply_markup
         )
         user_states[user_id] = "waiting_shaihuo"
-        
+
     elif data == "account_login":
+        def btn(text, data, emoji_id):
+            return InlineKeyboardButton(text, callback_data=data).to_dict() | {"icon_custom_emoji_id": emoji_id}
+
+        keyboard = [
+            [btn("手机号登录", "phone_login", "5877316724830768997")],
+            [btn("扫码登录", "qr_login", "5877318502947229960")],
+            [create_back_button()]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+
+        await query.edit_message_text(
+            text="请选择登录方式：",
+            parse_mode=ParseMode.HTML,
+            reply_markup=reply_markup
+        )
+
+    elif data == "phone_login":
         formatted_text = ACCOUNT_LOGIN_BACK.replace('\\n', '\n') if isinstance(ACCOUNT_LOGIN_BACK, str) else "📱 账号登陆功能\n\n输入手机号，发送验证码，返回Session+Json协议包"
         keyboard = [[create_back_button()]]
         reply_markup = InlineKeyboardMarkup(keyboard)
-        
+
         await query.edit_message_text(
             text=formatted_text,
             parse_mode=ParseMode.HTML,
@@ -229,73 +247,87 @@ async def process_button_callback(update: Update, context: ContextTypes.DEFAULT_
         )
         login_handlers[user_id] = LoginHandler(user_id, update.effective_chat.id)
         user_states[user_id] = "waiting_phone"
-        
+
+    elif data == "qr_login":
+        await query.answer()
+        await context.bot.send_message(
+            chat_id=update.effective_chat.id,
+            text="<tg-emoji emoji-id='5877318502947229960'>📱</tg-emoji> 正在生成二维码，请稍候...",
+            parse_mode=ParseMode.HTML
+        )
+        def on_cleanup():
+            user_qr_handlers.pop(user_id, None)
+        qr_handler = QrLoginHandler(user_id, update.effective_chat.id, context, cleanup_callback=on_cleanup)
+        user_qr_handlers[user_id] = qr_handler
+        asyncio.create_task(qr_handler.start_qr_login(update, context))
+        user_states[user_id] = "waiting_qr_login"
+
     elif data == "change_2fa":
         await show_2fa_menu(update, context)
-        
+
     elif data in ["2fa_input_mode", "2fa_auto_mode"]:
         await handle_2fa_mode_selection(update, context)
-        
+
     elif data == "merge_packs":
         await show_merge_packs(update, context, MERGE_PACKS_BACK, user_states)
-        
+
     elif data == "confirm_merge":
         await confirm_merge(update, context, user_states)
-        
+
     elif data == "kick_devices":
         await show_kick_devices(update, context)
-        
+
     elif data == "test_bidirectional":
         await show_bidirectional(update, context)
-        
+
     elif data == "privacy_config":
         await show_privacy_config(update, context)
-    
+
     elif data in ["privacy_phone", "privacy_last_seen", "privacy_forward", "privacy_profile_photo"]:
         await handle_privacy_selection(update, context)
-    
+
     elif data in ["privacy_set_everyone", "privacy_set_contacts", "privacy_set_nobody"]:
         await handle_privacy_option(update, context)
-    
+
     elif data == "privacy_confirm_upload":
         await handle_privacy_confirm_upload(update, context)
-    
+
     elif data == "privacy_reset_all":
         await handle_privacy_reset_all(update, context)
-        
+
     elif data == "format_convert":
         await show_convert_menu(update, context)
-        
+
     elif data in ["convert_session_to_tdata", "convert_tdata_to_session"]:
         await handle_convert_selection(update, context)
-        
+
     elif data == "convert_api":
         await show_convert_api(update, context)
-        
+
     elif data in ["api_no_2fa", "api_manual_2fa", "api_from_json"]:
         await handle_api_mode(update, context)
-        
+
     elif data == "clean_account":
         await show_clean_menu(update, context)
-        
+
     elif data in ["clean_chats", "clean_contacts", "clean_all"]:
         await handle_clean_selection(update, context)
-        
+
     elif data == "clean_passkeys":
         await handle_clean_selection(update, context)
-        
+
     elif data == "check_material":
         await show_material_menu(update, context)
-        
+
     elif data == "check_ban":
         await show_check_ban(update, context)
-        
+
     elif data == "prevent_recovery":
         await show_prevent_recovery(update, context)
-        
+
     elif data == "unpack_tool":
         await show_unpack_menu(update, context)
-        
+
     elif data == "recovery_skip_2fa":
         await handle_recovery_skip(update, context)
 
@@ -309,63 +341,68 @@ async def process_button_callback(update: Update, context: ContextTypes.DEFAULT_
             reply_markup=reply_markup
         )
         user_states[user_id] = "waiting_destroy_zip"
+
     elif data == "passkey_menu":
         await show_passkey_menu(update, context)
-        
+
     elif data in ["passkey_create", "passkey_login"]:
         await handle_passkey_selection(update, context)
-
-
+        
+        
+        
+        
 async def process_handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = str(update.effective_user.id)
     text = update.message.text
-    
-    all_users = load_all_users()
-    user_data = all_users.get(user_id, {})
-    
+    if user_id in user_qr_handlers:
+        handler = user_qr_handlers[user_id]
+        if hasattr(handler, 'waiting_for_2fa') and handler.waiting_for_2fa:
+            await handler.submit_2fa(update, context, text.strip())
+            return
+    if user_states.get(user_id) == "waiting_qr_login":
+        await update.message.reply_text(
+            "<tg-emoji emoji-id='5877318502947229960'>📱</tg-emoji> 请扫描二维码完成登录，无需发送消息",
+            parse_mode=ParseMode.HTML
+        )
+        return
     if user_id in user_recovery_states and user_recovery_states[user_id].get("state") == "waiting_2fa":
         await handle_recovery_2fa_input(update, context)
         return
-    
     if '2fa_state' in context.user_data:
         await handle_2fa_text_input(update, context)
         return
-    
     if user_id in user_api_states and user_api_states[user_id].get("waiting_2fa"):
         await handle_api_text(update, context)
         return
-    
     if user_id in user_unpack_states and user_unpack_states[user_id].get("waiting_format"):
         await handle_unpack_format(update, context)
         return
-    
+    all_users = load_all_users()
+    user_data = all_users.get(user_id, {})
     if user_data.get("status") != "vip":
         await update.message.reply_text(UN_ACTIVE_MSG, parse_mode=ParseMode.HTML)
         return
-    
     if user_id not in user_states:
         return
-    
+
     state = user_states.get(user_id)
-    
+
     if state == "waiting_phone":
         phone = re.sub(r'\s+', '', text.strip())
         if not re.match(r'^\+?[0-9]{7,15}$', phone):
             keyboard = [[create_back_button()]]
             reply_markup = InlineKeyboardMarkup(keyboard)
-            
             await update.message.reply_text(
                 "<tg-emoji emoji-id='5886496611835581345'>❌</tg-emoji> 手机号格式错误",
                 parse_mode='HTML',
                 reply_markup=reply_markup
             )
             return
-        
         handler = login_handlers.get(user_id)
         if handler:
             await handler.handle_phone(update, context, phone)
             user_states[user_id] = "waiting_code"
-    
+
     elif state == "waiting_code":
         code = text.strip()
         handler = login_handlers.get(user_id)
@@ -379,7 +416,7 @@ async def process_handle_message(update: Update, context: ContextTypes.DEFAULT_T
             else:
                 user_states.pop(user_id, None)
                 login_handlers.pop(user_id, None)
-    
+
     elif state == "waiting_2fa":
         password = text.strip()
         handler = login_handlers.get(user_id)
@@ -388,9 +425,17 @@ async def process_handle_message(update: Update, context: ContextTypes.DEFAULT_T
             if result:
                 user_states.pop(user_id, None)
                 login_handlers.pop(user_id, None)
+    
+    
                 
 async def process_handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = str(update.effective_user.id)
+    if user_states.get(user_id) == "waiting_qr_login":
+        await update.message.reply_text(
+            " 请先完成扫码登录，无需上传文件",
+            parse_mode=ParseMode.HTML
+        )
+        return
     
     all_users = load_all_users()
     user_data = all_users.get(user_id, {})
@@ -672,6 +717,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = str(user.id)
     user_states.pop(user_id, None)
     login_handlers.pop(user_id, None)
+    user_qr_handlers.pop(user_id, None)
     user_merge_sessions.pop(user_id, None)
     user_kick_states.pop(user_id, None)
     user_bidirectional_states.pop(user_id, None)
