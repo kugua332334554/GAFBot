@@ -37,6 +37,9 @@ load_dotenv()
 PASSKEY_BACK = os.getenv("PASSKEY_BACK", "🔑 <b>Passkey 功能管理</b>\n\n请选择您要执行的操作：").replace('\\n', '\n')
 user_passkey_states = {}
 
+def log_time(msg):
+    logger.info(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]}] {msg}")
+
 def repair_session(session_path):
     if not os.path.exists(session_path):
         return False
@@ -103,6 +106,7 @@ def get_random_proxy_dict():
                     except ValueError:
                         continue
         if valid_proxies:
+            log_time(f"从 proxy.txt 加载了 {len(valid_proxies)} 个有效代理")
             return random.choice(valid_proxies)
     except Exception:
         pass
@@ -159,6 +163,8 @@ def safe_extract(zip_ref, target_dir):
         zip_ref.extract(member, target_dir)
 
 async def convert_tdata_to_session_with_proxy(tdata_dir, output_dir, twofa, proxy_dict):
+    start_time = time.time()
+    log_time(f"开始转换 tdata: {tdata_dir}")
     API_ID = int(os.getenv("TELEGRAM_APP_ID", "2040"))
     API_HASH = os.getenv("TELEGRAM_APP_HASH", "b18441a1ff607e10a989891a5462e627")
     try:
@@ -229,8 +235,12 @@ async def convert_tdata_to_session_with_proxy(tdata_dir, output_dir, twofa, prox
         with open(json_path, 'w', encoding='utf-8') as f:
             json.dump(json_data, f, ensure_ascii=False, indent=2)
         await client.disconnect()
+        elapsed = time.time() - start_time
+        log_time(f"tdata 转换成功: {tdata_dir} -> {phone}，耗时 {elapsed:.2f}秒")
         return True, phone, final_session, json_path, None
     except Exception as e:
+        elapsed = time.time() - start_time
+        log_time(f"tdata 转换失败 {tdata_dir}: {e}，耗时 {elapsed:.2f}秒")
         logger.error(f"转换 tdata 失败 {tdata_dir}: {e}")
         return False, None, None, None, str(e)
 
@@ -286,8 +296,22 @@ async def generate_json_for_session(session_path, client, me, api_id, api_hash, 
         return None
 
 async def create_single_passkey(session_file, json_file, out_dir, api_id, api_hash):
+    start_time = time.time()
+    log_time(f"开始创建 Passkey: {os.path.basename(session_file)}")
+    
+    temp_dir = tempfile.mkdtemp(prefix="passkey_temp_")
+    temp_session = os.path.join(temp_dir, os.path.basename(session_file))
+    try:
+        shutil.copy2(session_file, temp_session)
+        log_time(f"已创建临时 session 副本: {temp_session}")
+        use_session = temp_session
+    except Exception as e:
+        log_time(f"复制 session 到临时目录失败: {e}，将使用原文件")
+        use_session = str(session_file)
+        temp_dir = None
+    
     client = None
-    session_path_str = str(session_file)
+    session_path_str = use_session
     retry_count = 0
     while retry_count < 2:
         try:
@@ -313,7 +337,7 @@ async def create_single_passkey(session_file, json_file, out_dir, api_id, api_ha
             if json_config.get('device_model'):
                 official_api.device_model = json_config['device_model']
             proxy = get_random_proxy_dict()
-            client = TelegramClient(session_path_str, api=official_api, proxy=proxy)
+            client = TelegramClient(session_path_str, api=official_api, proxy=proxy, receive_updates=False, timeout=10, connection_retries=1)
             break
         except ValueError as e:
             err_msg = str(e)
@@ -332,10 +356,16 @@ async def create_single_passkey(session_file, json_file, out_dir, api_id, api_ha
         except Exception as ex:
             return False, f"创建客户端异常: {str(ex)[:30]}"
     try:
-        await client.connect()
-        if not await client.is_user_authorized():
+        connect_start = time.time()
+        await asyncio.wait_for(client.connect(), timeout=15)
+        log_time(f"连接耗时: {time.time() - connect_start:.2f}秒")
+        auth_start = time.time()
+        if not await asyncio.wait_for(client.is_user_authorized(), timeout=10):
             return False, "会话未授权/已掉线"
-        Me = await client.get_me()
+        log_time(f"授权检查耗时: {time.time() - auth_start:.2f}秒")
+        me_start = time.time()
+        Me = await asyncio.wait_for(client.get_me(), timeout=10)
+        log_time(f"获取用户信息耗时: {time.time() - me_start:.2f}秒")
         Result = await client(functions.account.InitPasskeyRegistrationRequest())
         OptionsJson = json.loads(Result.options.data)
         PublicKey = OptionsJson.get("publicKey", {})
@@ -379,16 +409,28 @@ async def create_single_passkey(session_file, json_file, out_dir, api_id, api_ha
         }
         out_file = out_dir / f"{Me.phone or Path(session_file).stem}.Passkey"
         out_file.write_text(json.dumps(PasskeyPayload, ensure_ascii=False, indent=2), encoding="utf-8")
+        total_time = time.time() - start_time
+        log_time(f"账号 {os.path.basename(session_file)} Passkey创建成功，总耗时={total_time:.2f}秒")
         return True, "成功"
+    except asyncio.TimeoutError:
+        log_time(f"账号 {os.path.basename(session_file)} 网络操作超时")
+        return False, "网络操作超时"
     except FloodWaitError as e:
         return False, f"频繁限制: {e.seconds}秒"
     except Exception as e:
         return False, f"错误: {str(e)[:20]}"
     finally:
         if client:
+            disconnect_start = time.time()
             await client.disconnect()
+            log_time(f"断开连接耗时: {time.time() - disconnect_start:.2f}秒")
+        if temp_dir and os.path.exists(temp_dir):
+            shutil.rmtree(temp_dir, ignore_errors=True)
+            log_time(f"已清理临时目录: {temp_dir}")
 
 async def login_single_passkey(passkey_file, out_dir, api_id, api_hash):
+    start_time = time.time()
+    log_time(f"开始 Passkey 登录: {os.path.basename(passkey_file)}")
     client = None
     try:
         raw_data = passkey_file.read_text(encoding="utf-8")
@@ -408,8 +450,10 @@ async def login_single_passkey(passkey_file, out_dir, api_id, api_hash):
         official_api.api_id = api_id
         official_api.api_hash = api_hash
         proxy = get_random_proxy_dict()
-        client = TelegramClient(str(SessionPath), api=official_api, proxy=proxy)
-        await client.connect()
+        client = TelegramClient(str(SessionPath), api=official_api, proxy=proxy, receive_updates=False, timeout=10, connection_retries=1)
+        connect_start = time.time()
+        await asyncio.wait_for(client.connect(), timeout=15)
+        log_time(f"连接耗时: {time.time() - connect_start:.2f}秒")
         MaxAttempts = 3
         CurrentSignCount = SignCount + 1
         LoginOk = False
@@ -448,14 +492,23 @@ async def login_single_passkey(passkey_file, out_dir, api_id, api_hash):
                 raise E
         if not LoginOk:
             return False, "登录失败"
-        Me = await client.get_me()
+        me_start = time.time()
+        Me = await asyncio.wait_for(client.get_me(), timeout=10)
+        log_time(f"获取用户信息耗时: {time.time() - me_start:.2f}秒")
         await generate_json_for_session(SessionPath, client, Me, api_id, api_hash, official_api, PasskeyData.get("TwoFA"))
+        total_time = time.time() - start_time
+        log_time(f"Passkey 登录成功: {phone}，总耗时={total_time:.2f}秒")
         return True, "成功"
+    except asyncio.TimeoutError:
+        log_time(f"Passkey 登录 {os.path.basename(passkey_file)} 网络操作超时")
+        return False, "网络操作超时"
     except Exception as e:
         return False, f"错误: {str(e)[:20]}"
     finally:
         if client:
+            disconnect_start = time.time()
             await client.disconnect()
+            log_time(f"断开连接耗时: {time.time() - disconnect_start:.2f}秒")
 
 async def show_passkey_menu(update, context):
     from bot import create_back_button
@@ -614,7 +667,7 @@ async def process_passkey_create(update, context, zip_path, user_id, status_msg)
                 success_count += 1
             else:
                 fail_count += 1
-            await asyncio.sleep(0.5)
+            await asyncio.sleep(0.1)
         if success_count > 0:
             result_zip = Path(temp_dir) / "Passkeys_Exported.zip"
             with zipfile.ZipFile(result_zip, 'w') as zipf:
@@ -665,7 +718,7 @@ async def process_passkey_login(update, context, zip_path, user_id, status_msg):
                 success_count += 1
             else:
                 fail_count += 1
-            await asyncio.sleep(0.5)
+            await asyncio.sleep(0.1)
         if success_count > 0:
             result_zip = Path(temp_dir) / "Passkey_Sessions.zip"
             with zipfile.ZipFile(result_zip, 'w') as zipf:
