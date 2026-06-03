@@ -39,6 +39,9 @@ PROXY_LIST_CACHE_TIME = 60
 
 user_recovery_states = {}
 
+def log_time(msg):
+    logger.info(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]}] {msg}")
+
 def repair_session(session_path):
     if not os.path.exists(session_path):
         return False
@@ -85,6 +88,7 @@ def load_proxies():
 
     current_time = time.time()
     if _proxy_list is not None and (current_time - _proxy_list_last_load) < PROXY_LIST_CACHE_TIME:
+        log_time("使用缓存的代理列表")
         return _proxy_list
 
     proxy_file = "proxy.txt"
@@ -200,6 +204,8 @@ def read_2fa_from_folder(folder_path: str):
     return None
 
 async def convert_tdata_to_session_with_proxy(tdata_dir, output_dir, twofa, proxy_dict):
+    start_time = time.time()
+    log_time(f"开始转换 tdata: {tdata_dir}")
     API_ID = int(os.getenv("TELEGRAM_APP_ID", "2040"))
     API_HASH = os.getenv("TELEGRAM_APP_HASH", "b18441a1ff607e10a989891a5462e627")
 
@@ -280,9 +286,13 @@ async def convert_tdata_to_session_with_proxy(tdata_dir, output_dir, twofa, prox
             json.dump(json_data, f, ensure_ascii=False, indent=2)
 
         await client.disconnect()
+        elapsed = time.time() - start_time
+        log_time(f"tdata 转换成功: {tdata_dir} -> {phone}，耗时 {elapsed:.2f}秒")
         return True, phone, final_session, json_path, None
 
     except Exception as e:
+        elapsed = time.time() - start_time
+        log_time(f"tdata 转换失败 {tdata_dir}: {e}，耗时 {elapsed:.2f}秒")
         logger.error(f"转换 tdata 失败 {tdata_dir}: {e}")
         return False, None, None, None, str(e)
 
@@ -594,7 +604,7 @@ async def _process_recovery_internal(update, context, user_id, session_files, ex
                 shutil.copy2(json_path, os.path.join(target_dir, os.path.basename(json_path)))
 
         results.append(result)
-        await asyncio.sleep(1)
+        await asyncio.sleep(0.1)
 
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
     success_zip = None
@@ -813,7 +823,10 @@ async def process_single_account(session_path, json_path, two_fa, user_id, sessi
                 client_old = OpenteleClient(
                     session=str(session_copy),
                     api=official_api_old,
-                    proxy=proxy_dict
+                    proxy=proxy_dict,
+                    receive_updates=False,
+                    timeout=10,
+                    connection_retries=1
                 )
                 break
             except ValueError as e:
@@ -836,13 +849,22 @@ async def process_single_account(session_path, json_path, two_fa, user_id, sessi
                 result["message"] = f"创建客户端异常: {str(ex)[:30]}"
                 return result
 
-        await client_old.connect()
+        connect_start = time.time()
+        await asyncio.wait_for(client_old.connect(), timeout=15)
+        log_time(f"连接耗时: {time.time() - connect_start:.2f}秒")
 
-        if not await client_old.is_user_authorized():
+        auth_start = time.time()
+        if not await asyncio.wait_for(client_old.is_user_authorized(), timeout=10):
             result["message"] = "原session无效"
             return result
+        log_time(f"授权检查耗时: {time.time() - auth_start:.2f}秒")
 
-        me = await client_old.get_me()
+        me_start = time.time()
+        me = await asyncio.wait_for(client_old.get_me(), timeout=10)
+        if not me:
+            result["message"] = "无法获取用户信息"
+            return result
+        log_time(f"获取用户信息耗时: {time.time() - me_start:.2f}秒")
         phone = me.phone
 
         if not json_path or not os.path.exists(json_path):
@@ -860,7 +882,10 @@ async def process_single_account(session_path, json_path, two_fa, user_id, sessi
         client_new = OpenteleClient(
             session=str(new_session_path),
             api=official_api_new,
-            proxy=proxy_dict_new
+            proxy=proxy_dict_new,
+            receive_updates=False,
+            timeout=10,
+            connection_retries=1
         )
         await client_new.connect()
 
@@ -932,12 +957,18 @@ async def process_single_account(session_path, json_path, two_fa, user_id, sessi
         result["new_session_path"] = new_session_path
         result["new_json_path"] = new_json_path
 
+    except asyncio.TimeoutError:
+        result["message"] = "网络操作超时"
     except Exception as e:
         result["message"] = f"错误: {str(e)[:50]}"
     finally:
         if client_old:
+            disconnect_start = time.time()
             await client_old.disconnect()
+            log_time(f"断开连接耗时: {time.time() - disconnect_start:.2f}秒")
         if client_new:
+            disconnect_start = time.time()
             await client_new.disconnect()
+            log_time(f"断开连接耗时: {time.time() - disconnect_start:.2f}秒")
 
     return result
