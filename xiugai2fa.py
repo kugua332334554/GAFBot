@@ -30,11 +30,15 @@ _proxy_list = None
 _proxy_list_last_load = 0
 PROXY_LIST_CACHE_TIME = 60
 
+def log_time(msg):
+    logger.info(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]}] {msg}")
+
 def load_proxies():
     global _proxy_list, _proxy_list_last_load
     current_time = time.time()
     
     if _proxy_list is not None and (current_time - _proxy_list_last_load) < PROXY_LIST_CACHE_TIME:
+        log_time("使用缓存的代理列表")
         return _proxy_list
     
     proxy_file = "proxy.txt"
@@ -404,6 +408,8 @@ def read_2fa_from_folder(folder_path: str):
     return None
 
 async def convert_tdata_to_session_with_proxy(tdata_dir, output_dir, twofa, proxy_dict):
+    start_time = time.time()
+    log_time(f"开始转换 tdata: {tdata_dir}")
     API_ID = int(os.getenv("TELEGRAM_APP_ID", "2040"))
     API_HASH = os.getenv("TELEGRAM_APP_HASH", "b18441a1ff607e10a989891a5462e627")
     
@@ -484,9 +490,13 @@ async def convert_tdata_to_session_with_proxy(tdata_dir, output_dir, twofa, prox
             json.dump(json_data, f, ensure_ascii=False, indent=2)
         
         await client.disconnect()
+        elapsed = time.time() - start_time
+        log_time(f"tdata 转换成功: {tdata_dir} -> {phone}，耗时 {elapsed:.2f}秒")
         return True, phone, final_session, json_path, None
         
     except Exception as e:
+        elapsed = time.time() - start_time
+        log_time(f"tdata 转换失败 {tdata_dir}: {e}，耗时 {elapsed:.2f}秒")
         logger.error(f"转换 tdata 失败 {tdata_dir}: {e}")
         return False, None, None, None, str(e)
 
@@ -562,6 +572,20 @@ async def change_2fa(client, old_password, new_password):
         return False, f"修改失败: {str(e)[:50]}"
 
 async def check_session_2fa(session_file, json_file, api_id, api_hash, old_2fa=None, new_2fa=None, mode="auto", tdata_dir=None):
+    start_time = time.time()
+    log_time(f"开始检查 session 2FA: {os.path.basename(session_file)}")
+    
+    temp_dir = tempfile.mkdtemp(prefix="shaihuo_temp_")
+    temp_session = os.path.join(temp_dir, os.path.basename(session_file))
+    try:
+        shutil.copy2(session_file, temp_session)
+        log_time(f"已创建临时 session 副本: {temp_session}")
+        use_session = temp_session
+    except Exception as e:
+        log_time(f"复制 session 到临时目录失败: {e}，将使用原文件")
+        use_session = session_file
+        temp_dir = None
+    
     client = None
     result = {
         "session": os.path.basename(session_file),
@@ -638,22 +662,25 @@ async def check_session_2fa(session_file, json_file, api_id, api_hash, old_2fa=N
                 proxy_dict = create_proxy_dict(proxy) if proxy else None
                 
                 client = TelegramClient(
-                    session_file,
+                    use_session,
                     api=official_api,
-                    proxy=proxy_dict
+                    proxy=proxy_dict,
+                    receive_updates=False,
+                    timeout=10,
+                    connection_retries=1
                 )
                 break
             except ValueError as e:
                 err_msg = str(e)
                 if ("not enough values to unpack (expected 6, got 5)" in err_msg or
                     "too many values to unpack (expected 6)" in err_msg) and retry_count == 0:
-                    logger.warning(f"检测到 session 文件格式问题: {session_file}，尝试自动修复")
-                    if repair_session(session_file):
+                    logger.warning(f"检测到 session 文件格式问题: {use_session}，尝试自动修复")
+                    if repair_session(use_session):
                         logger.info(f"修复完成，重试创建客户端")
                         retry_count += 1
                         continue
                     else:
-                        logger.error(f"自动修复失败，无法使用该 session: {session_file}")
+                        logger.error(f"自动修复失败，无法使用该 session: {use_session}")
                         result["status"] = "failed"
                         result["message"] = "Session文件损坏且修复失败"
                         return result
@@ -666,29 +693,35 @@ async def check_session_2fa(session_file, json_file, api_id, api_hash, old_2fa=N
                 result["message"] = f"创建客户端异常: {str(ex)[:30]}"
                 return result
         
-        await client.connect()
+        connect_start = time.time()
+        await asyncio.wait_for(client.connect(), timeout=15)
+        log_time(f"连接耗时: {time.time() - connect_start:.2f}秒")
         
-        if not await client.is_user_authorized():
+        auth_start = time.time()
+        if not await asyncio.wait_for(client.is_user_authorized(), timeout=10):
             result["status"] = "failed"
             result["message"] = "session无效"
             return result
+        log_time(f"授权检查耗时: {time.time() - auth_start:.2f}秒")
         
-        me = await client.get_me()
+        me_start = time.time()
+        me = await asyncio.wait_for(client.get_me(), timeout=10)
         if not me:
             result["status"] = "failed"
             result["message"] = "无法获取用户信息"
             return result
+        log_time(f"获取用户信息耗时: {time.time() - me_start:.2f}秒")
         
         result["phone"] = me.phone
         
         if not final_json_file:
             generated_json = await generate_json_for_session(
-                session_file, client, me, final_api_id, final_api_hash, official_api
+                use_session, client, me, final_api_id, final_api_hash, official_api
             )
             if generated_json:
                 final_json_file = generated_json
                 result["json_path"] = generated_json
-                logger.info(f"已为 {session_file} 生成新 JSON: {generated_json}")
+                logger.info(f"已为 {use_session} 生成新 JSON: {generated_json}")
         
         if mode == "auto":
             old = result["original_2fa"]
@@ -751,18 +784,29 @@ async def check_session_2fa(session_file, json_file, api_id, api_hash, old_2fa=N
                     result["status"] = "failed"
                     result["message"] = f"设置失败: {str(e)[:50]}"
         
+        total_time = time.time() - start_time
+        log_time(f"账号 {os.path.basename(session_file)} 2FA处理完成，状态={result['status']}，总耗时={total_time:.2f}秒")
+        
     except SessionPasswordNeededError:
         result["status"] = "failed"
         result["message"] = "需要2FA验证"
     except FloodWaitError as e:
         result["status"] = "failed"
         result["message"] = f"等待{e.seconds}秒"
+    except asyncio.TimeoutError:
+        result["status"] = "failed"
+        result["message"] = "网络操作超时"
     except Exception as e:
         result["status"] = "failed"
         result["message"] = f"错误: {str(e)[:30]}"
     finally:
         if client:
+            disconnect_start = time.time()
             await client.disconnect()
+            log_time(f"断开连接耗时: {time.time() - disconnect_start:.2f}秒")
+        if temp_dir and os.path.exists(temp_dir):
+            shutil.rmtree(temp_dir, ignore_errors=True)
+            log_time(f"已清理临时目录: {temp_dir}")
     
     return result
 
@@ -1026,7 +1070,7 @@ async def _process_2fa_internal(update, context, zip_path, user_id, api_id, api_
                     except:
                         pass
             
-            await asyncio.sleep(0.5)
+            await asyncio.sleep(0.1)
         
         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
         
