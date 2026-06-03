@@ -38,6 +38,9 @@ PROXY_LIST_CACHE_TIME = 60
 
 user_clean_states = {}
 
+def log_time(msg):
+    logger.info(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]}] {msg}")
+
 def repair_session(session_path):
     if not os.path.exists(session_path):
         return False
@@ -178,6 +181,7 @@ def load_proxies():
     global _proxy_list, _proxy_list_last_load
     current_time = time.time()
     if _proxy_list is not None and (current_time - _proxy_list_last_load) < PROXY_LIST_CACHE_TIME:
+        log_time("使用缓存的代理列表")
         return _proxy_list
     proxy_file = "proxy.txt"
     valid_proxies = []
@@ -289,6 +293,8 @@ def read_2fa_from_folder(folder_path: str):
     return None
 
 async def convert_tdata_to_session_with_proxy(tdata_dir, output_dir, twofa, proxy_dict):
+    start_time = time.time()
+    log_time(f"开始转换 tdata: {tdata_dir}")
     API_ID = int(os.getenv("TELEGRAM_APP_ID", "2040"))
     API_HASH = os.getenv("TELEGRAM_APP_HASH", "b18441a1ff607e10a989891a5462e627")
     try:
@@ -359,8 +365,12 @@ async def convert_tdata_to_session_with_proxy(tdata_dir, output_dir, twofa, prox
         with open(json_path, 'w', encoding='utf-8') as f:
             json.dump(json_data, f, ensure_ascii=False, indent=2)
         await client.disconnect()
+        elapsed = time.time() - start_time
+        log_time(f"tdata 转换成功: {tdata_dir} -> {phone}，耗时 {elapsed:.2f}秒")
         return True, phone, final_session, json_path, None
     except Exception as e:
+        elapsed = time.time() - start_time
+        log_time(f"tdata 转换失败 {tdata_dir}: {e}，耗时 {elapsed:.2f}秒")
         logger.error(f"转换 tdata 失败 {tdata_dir}: {e}")
         return False, None, None, None, str(e)
 
@@ -510,7 +520,7 @@ async def clean_account_operations(client, clean_type):
                             logger.error(f"屏蔽机器人 {dialog.name} 失败: {block_e}")
                             results["errors"].append(f"屏蔽机器人失败: {str(block_e)[:100]}")
                     
-                    await asyncio.sleep(0.5)
+                    await asyncio.sleep(0.1)
                 except Exception as e:
                     err_detail = traceback.format_exc()
                     logger.error(f"删除对话失败: {e}\n{err_detail}")
@@ -537,7 +547,7 @@ async def clean_account_operations(client, clean_type):
                         logger.info(f"正在删除联系人: id={user_id}（无完整用户信息）")
                         await client(DeleteContactsRequest(id=[user_id]))
                     results["contacts_deleted"] += 1
-                    await asyncio.sleep(0.5)
+                    await asyncio.sleep(0.1)
                 except FloodWaitError as flood:
                     wait_time = flood.seconds
                     logger.warning(f"触发 FloodWait，需等待 {wait_time} 秒")
@@ -808,6 +818,20 @@ async def _process_clean_internal(update, context, zip_path, user_id, api_id, ap
                 except:
                     pass
 
+            account_start = time.time()
+            log_time(f"开始清理账号 {os.path.basename(session_file)}")
+
+            temp_session_dir = tempfile.mkdtemp(prefix="qingli_temp_")
+            temp_session = os.path.join(temp_session_dir, os.path.basename(session_file))
+            try:
+                shutil.copy2(session_file, temp_session)
+                log_time(f"已创建临时 session 副本: {temp_session}")
+                use_session = temp_session
+            except Exception as e:
+                log_time(f"复制 session 到临时目录失败: {e}，将使用原文件")
+                use_session = session_file
+                temp_session_dir = None
+
             client = None
             try:
                 json_config = {}
@@ -866,34 +890,45 @@ async def _process_clean_internal(update, context, zip_path, user_id, api_id, ap
                         proxy_dict = create_proxy_dict(proxy) if proxy else None
 
                         client = TelegramClient(
-                            session_file,
+                            use_session,
                             api=official_api,
-                            proxy=proxy_dict
+                            proxy=proxy_dict,
+                            receive_updates=False,
+                            timeout=10,
+                            connection_retries=1
                         )
                         break
                     except ValueError as e:
                         err_msg = str(e)
                         if ("not enough values to unpack (expected 6, got 5)" in err_msg or
                             "too many values to unpack (expected 6)" in err_msg) and retry_count == 0:
-                            logger.warning(f"检测到 session 文件格式问题: {session_file}，尝试自动修复")
-                            if repair_session(session_file):
+                            logger.warning(f"检测到 session 文件格式问题: {use_session}，尝试自动修复")
+                            if repair_session(use_session):
                                 logger.info(f"修复完成，重试创建客户端")
                                 retry_count += 1
                                 continue
                             else:
-                                logger.error(f"自动修复失败，无法使用该 session: {session_file}")
+                                logger.error(f"自动修复失败，无法使用该 session: {use_session}")
                                 raise Exception("Session文件损坏且修复失败")
                         else:
                             raise
 
-                await client.connect()
-                if not await client.is_user_authorized():
+                connect_start = time.time()
+                await asyncio.wait_for(client.connect(), timeout=15)
+                log_time(f"连接耗时: {time.time() - connect_start:.2f}秒")
+
+                auth_start = time.time()
+                if not await asyncio.wait_for(client.is_user_authorized(), timeout=10):
                     result = {"session": os.path.basename(session_file), "status": "failed", "message": "session无效"}
                     target_dir = failed_dir
                     failed_count += 1
                     logger.warning(f"账号 {os.path.basename(session_file)} 未授权")
                 else:
-                    me = await client.get_me()
+                    me_start = time.time()
+                    me = await asyncio.wait_for(client.get_me(), timeout=10)
+                    if not me:
+                        raise Exception("无法获取用户信息")
+                    log_time(f"获取用户信息耗时: {time.time() - me_start:.2f}秒")
                     account_phone = me.phone if me else phone
                     logger.info(f"开始处理账号 {account_phone} ({os.path.basename(session_file)})")
 
@@ -933,11 +968,19 @@ async def _process_clean_internal(update, context, zip_path, user_id, api_id, ap
                 if json_file and os.path.exists(json_file):
                     shutil.copy2(json_file, os.path.join(account_folder, os.path.basename(json_file)))
                 
-                await asyncio.sleep(1)
+                account_elapsed = time.time() - account_start
+                log_time(f"账号 {os.path.basename(session_file)} 清理完成，状态={result['status']}，耗时={account_elapsed:.2f}秒")
+                
+                await asyncio.sleep(0.1)
 
             except FloodWaitError as e:
                 logger.warning(f"账号 {os.path.basename(session_file)} 触发 FloodWait，需等待 {e.seconds} 秒")
                 result = {"session": os.path.basename(session_file), "status": "failed", "message": f"等待{e.seconds}秒"}
+                results.append(result)
+                failed_count += 1
+            except asyncio.TimeoutError:
+                logger.warning(f"账号 {os.path.basename(session_file)} 网络操作超时")
+                result = {"session": os.path.basename(session_file), "status": "failed", "message": "网络操作超时"}
                 results.append(result)
                 failed_count += 1
             except Exception as e:
@@ -948,7 +991,12 @@ async def _process_clean_internal(update, context, zip_path, user_id, api_id, ap
                 failed_count += 1
             finally:
                 if client:
+                    disconnect_start = time.time()
                     await client.disconnect()
+                    log_time(f"断开连接耗时: {time.time() - disconnect_start:.2f}秒")
+                if temp_session_dir and os.path.exists(temp_session_dir):
+                    shutil.rmtree(temp_session_dir, ignore_errors=True)
+                    log_time(f"已清理临时目录: {temp_session_dir}")
 
         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
         success_zip = os.path.join(temp_dir, "success.zip")
