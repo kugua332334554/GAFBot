@@ -390,9 +390,8 @@ class QrLoginHandler:
 
     async def _finish_qr_login(self, update, context):
         try:
-            # 强制拉取当前用户和对话列表，确保数据库表 entities 被创建
             me = await self.client.get_me()
-            await self.client.get_dialogs()  # 这步会初始化 entities 表
+            await self.client.get_dialogs()
             self.phone = me.phone
 
             reg_time = datetime.now().strftime("%Y-%m-%d")
