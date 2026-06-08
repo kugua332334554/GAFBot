@@ -322,6 +322,12 @@ async def convert_session_to_tdata(session_path: str, output_dir: str, twofa: Op
             else:
                 f.write("无2FA密码。")
 
+        if os.path.exists(session_path):
+            shutil.copy2(session_path, os.path.join(account_dir, os.path.basename(session_path)))
+        json_orig = os.path.splitext(session_path)[0] + '.json'
+        if os.path.exists(json_orig):
+            shutil.copy2(json_orig, os.path.join(account_dir, os.path.basename(json_orig)))
+
         total_time = time.time() - start_time
         log_time(f"Session 转 Tdata 成功: {session_path} -> {account_name}，耗时 {total_time:.2f}秒")
         return True, account_name, account_dir
