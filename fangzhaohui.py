@@ -391,9 +391,17 @@ async def handle_recovery_document(update: Update, context: ContextTypes.DEFAULT
                 account_out = os.path.join(convert_dir, f"acc_{idx}")
                 os.makedirs(account_out, exist_ok=True)
 
-                success, phone, sess_path, json_path, err = await convert_tdata_to_session_with_proxy(
-                    tdata_dir, account_out, twofa, proxy_dict
-                )
+                try:
+                    success, phone, sess_path, json_path, err = await asyncio.wait_for(
+                        convert_tdata_to_session_with_proxy(tdata_dir, account_out, twofa, proxy_dict),
+                        timeout=60
+                    )
+                except asyncio.TimeoutError:
+                    success = False
+                    err = "转换超时（60秒）"
+                    phone = None
+                    sess_path = None
+                    json_path = None
 
                 if success and sess_path and json_path:
                     session_files.append(sess_path)
@@ -578,15 +586,19 @@ async def _process_recovery_internal(update, context, user_id, session_files, ex
                     break
 
         try:
-            result = await process_single_account(session_path, json_path, two_fa, user_id, session_name)
-        except Exception as e:
+            result = await asyncio.wait_for(
+                process_single_account(session_path, json_path, two_fa, user_id, session_name),
+                timeout=120
+            )
+        except asyncio.TimeoutError:
             result = {
                 "session_name": session_name,
                 "status": "failed",
-                "message": f"异常: {str(e)[:50]}",
+                "message": "处理超时（超过120秒）",
                 "new_session_path": None,
                 "new_json_path": None
             }
+            logger.error(f"账号 {session_name} 处理超时")
 
         if result["status"] == "success":
             target_dir = success_dir
