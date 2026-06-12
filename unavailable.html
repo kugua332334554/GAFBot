@@ -317,7 +317,6 @@
       color: var(--tg-theme-destructive-text-color);
     }
 
-    /* 移动端优化 */
     @media (max-width: 767px) {
       .ads-section {
         margin: 15px 0;
@@ -333,7 +332,6 @@
       }
     }
 
-    /* 额外的桌面优化 */
     @media (min-width: 992px) {
       .container {
         max-width: 900px;
@@ -392,12 +390,8 @@
           </svg>
 
           <div class="error-message">
-            <h3>
-              账户不可用/无验证码
-              
-            </h3>
-            <p>请联系分销商处理</p>
-            
+            <h3>错误详情</h3>
+            <p>{error}</p>
           </div>
 
           
