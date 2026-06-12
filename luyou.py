@@ -10,6 +10,7 @@ import random
 from datetime import datetime
 from opentele.tl import TelegramClient
 from telethon import events
+from telethon.errors import RPCError, FloodWaitError
 from opentele.api import API
 import sqlite3
 import shutil
@@ -221,7 +222,7 @@ def get_code():
 
     twofa = get_twofa_from_api(safe_sid)
 
-    code, msg_time = fetch_code_sync(safe_sid, session_path)
+    code, msg_time, error_type = fetch_code_sync(safe_sid, session_path)
 
     if code and msg_time:
         return render_with_ads(
@@ -231,8 +232,23 @@ def get_code():
             time=msg_time
         )
 
-    logger.info(f"ID {safe_sid} 获取验证码失败或超时")
-    return render_with_ads('unavailable.html', error='暂未接收到最新验证码，请稍后重试'), 404
+    error_messages = {
+        'account_banned': '账号已被 Telegram 封禁，无法登录',
+        'flood_wait': '请求频率过高，请稍后重试',
+        'two_fa_required': '账号开启了二次验证，请联系分销商',
+        'unauthorized': '会话未授权，需要重新登录',
+        'auth_key_invalid': '授权密钥无效，请重置会话',
+        'api_config_invalid': 'API 配置错误，请联系管理员',
+        'code_expired': '验证码已过期，请重新获取',
+        'phone_invalid': '手机号无效',
+        'phone_not_registered': '该手机号未注册 Telegram',
+        'session_format': 'Session 文件格式损坏',
+        'client_create': '客户端创建失败',
+        'no_code': '暂未接收到最新验证码，请稍后重试'
+    }
+    error_msg = error_messages.get(error_type, '获取验证码失败，请稍后重试')
+    logger.info(f"ID {safe_sid} 获取验证码失败: {error_type}")
+    return render_with_ads('unavailable.html', error=error_msg), 404
 
 def fetch_code_sync(sid, session_path):
     async def _fetch():
@@ -294,7 +310,7 @@ def fetch_code_sync(sid, session_path):
                         continue
                     else:
                         logger.error(f"自动修复失败，无法使用该 session")
-                        return None, None
+                        return None, None, 'session_format'
                 elif "too many values to unpack (expected 6)" in str(e) and attempt == 0:
                     logger.warning(f"检测到 session 文件列数过多，尝试自动修复: {session_path}")
                     if repair_session(session_path):
@@ -303,18 +319,32 @@ def fetch_code_sync(sid, session_path):
                         continue
                     else:
                         logger.error(f"自动修复失败，无法使用该 session")
-                        return None, None
+                        return None, None, 'session_format'
                 else:
                     logger.error(f"创建 TelegramClient 失败: {e}")
-                    return None, None
+                    return None, None, 'client_create'
 
         try:
             await client.connect()
-            if not await client.is_user_authorized():
-                logger.error(f"ID {sid} 授权失效")
-                return None, None
+            try:
+                if not await client.is_user_authorized():
+                    logger.error(f"ID {sid} 授权失效")
+                    return None, None, 'unauthorized'
+            except Exception as auth_err:
+                err_name = type(auth_err).__name__
+                if err_name == 'UnauthorizedError' or getattr(auth_err, 'code', 0) == 401:
+                    return None, None, 'unauthorized'
+                elif 'AuthKey' in err_name:
+                    return None, None, 'auth_key_invalid'
+                else:
+                    raise auth_err
 
-            msgs = await client.get_messages(777000, limit=20)
+            try:
+                msgs = await client.get_messages(777000, limit=20)
+            except RPCError as rpc_err:
+                error_type = parse_rpc_error_type(rpc_err)
+                return None, None, error_type
+
             for msg in msgs:
                 text = msg.message or ''
                 codes = re.findall(r'\d{5,6}', text)
@@ -322,7 +352,7 @@ def fetch_code_sync(sid, session_path):
                     latest_code = codes[0]
                     msg_time = msg.date.astimezone().strftime("%Y-%m-%d %H:%M:%S")
                     logger.info(f"历史记录获取成功: {latest_code} (时间: {msg_time})")
-                    return latest_code, msg_time
+                    return latest_code, msg_time, None
 
             future = asyncio.Future()
 
@@ -338,14 +368,18 @@ def fetch_code_sync(sid, session_path):
 
             try:
                 result = await asyncio.wait_for(future, timeout=30)
-                return result
+                return result[0], result[1], None
             except asyncio.TimeoutError:
                 logger.info(f"等待验证码超时 {sid}")
-                return None, None
+                return None, None, 'no_code'
 
+        except RPCError as rpc_err:
+            error_type = parse_rpc_error_type(rpc_err)
+            logger.error(f"获取验证码失败 {sid}: {rpc_err} -> {error_type}")
+            return None, None, error_type
         except Exception as e:
             logger.error(f"获取验证码失败 {sid}: {e}")
-            return None, None
+            return None, None, 'unknown'
         finally:
             await client.disconnect()
 
@@ -355,6 +389,30 @@ def fetch_code_sync(sid, session_path):
         return loop.run_until_complete(_fetch())
     finally:
         loop.close()
+
+def parse_rpc_error_type(error):
+    error_name = type(error).__name__
+    if error_name in ('UserDeactivatedBanError', 'UserBannedError', 'PhoneNumberBannedError', 'UserRestrictedError'):
+        return 'account_banned'
+    if 'Flood' in error_name:
+        return 'flood_wait'
+    if error_name == 'SessionPasswordNeededError':
+        return 'two_fa_required'
+    if error_name == 'UnauthorizedError' or getattr(error, 'code', 0) == 401:
+        return 'unauthorized'
+    if 'AuthKey' in error_name:
+        return 'auth_key_invalid'
+    if 'ApiId' in error_name or 'ApiHash' in error_name:
+        return 'api_config_invalid'
+    if error_name == 'PhoneCodeExpiredError':
+        return 'code_expired'
+    if 'PhoneCode' in error_name:
+        return 'code_invalid'
+    if error_name == 'PhoneNumberInvalidError':
+        return 'phone_invalid'
+    if error_name == 'PhoneNumberUnoccupiedError':
+        return 'phone_not_registered'
+    return 'unknown'
 
 @app.route('/copy.svg')
 def get_copy_svg():
