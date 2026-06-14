@@ -1092,12 +1092,14 @@ async def _process_2fa_internal(update, context, zip_path, user_id, api_id, api_
                     with open(json_to_copy, 'r', encoding='utf-8') as f:
                         json_data = json.load(f)
                     
+                    twofa_keys = ['2fa', '2FA', 'twofa', 'password', 'two_fa']
                     if result["new_2fa_set"] is not None:
-                        json_data['2fa'] = result["new_2fa_set"]
+                        new_val = result["new_2fa_set"]
+                        for key in twofa_keys:
+                            json_data[key] = new_val
                     else:
-                        json_data.pop('2fa', None)
-                        json_data.pop('2FA', None)
-                        json_data.pop('password', None)
+                        for key in twofa_keys:
+                            json_data.pop(key, None)
                     
                     new_json_path = os.path.join(account_folder, os.path.basename(json_to_copy))
                     with open(new_json_path, 'w', encoding='utf-8') as f:
