@@ -569,7 +569,7 @@ async def change_2fa(client, old_password, new_password):
         error_str = str(e).lower()
         if "invalid password" in error_str or "password invalid" in error_str:
             return False, "旧密码错误"
-        return False, f"修改失败: {str(e)[:50]}"
+        return False, f"修改失败: {str(e)}"
 
 async def check_session_2fa(session_file, json_file, api_id, api_hash, old_2fa=None, new_2fa=None, mode="auto", tdata_dir=None):
     start_time = time.time()
@@ -604,12 +604,21 @@ async def check_session_2fa(session_file, json_file, api_id, api_hash, old_2fa=N
         try:
             with open(final_json_file, 'r', encoding='utf-8') as f:
                 json_config = json.load(f)
-                json_2fa = json_config.get('2fa') or json_config.get('2FA') or json_config.get('password')
+                log_time(f"成功加载 JSON 文件: {final_json_file}")
+                json_2fa = (json_config.get('2fa') or 
+                           json_config.get('2FA') or 
+                           json_config.get('password') or 
+                           json_config.get('twofa') or 
+                           json_config.get('two_fa'))
+                log_time(f"从 JSON 中提取的旧密码: {json_2fa if json_2fa else 'None'}")
                 result["original_2fa"] = json_2fa
         except Exception as e:
             logger.warning(f"读取 JSON 配置失败 {json_file}: {e}")
+            log_time(f"读取 JSON 失败: {e}")
             final_json_file = None
             json_config = {}
+    else:
+        log_time(f"未找到 JSON 文件: {json_file}")
     
     final_api_id = api_id
     final_api_hash = api_hash
@@ -617,10 +626,12 @@ async def check_session_2fa(session_file, json_file, api_id, api_hash, old_2fa=N
         if 'app_id' in json_config and json_config['app_id']:
             try:
                 final_api_id = int(json_config['app_id'])
+                log_time(f"使用 JSON 中的 api_id: {final_api_id}")
             except (ValueError, TypeError):
                 logger.warning(f"无效的 app_id: {json_config['app_id']}, 使用默认值")
         if 'app_hash' in json_config and json_config['app_hash']:
             final_api_hash = str(json_config['app_hash'])
+            log_time(f"使用 JSON 中的 api_hash: {final_api_hash[:10]}...")
     
     device_model = json_config.get('device_model') if json_config else None
     app_version = json_config.get('app_version') if json_config else None
@@ -660,6 +671,10 @@ async def check_session_2fa(session_file, json_file, api_id, api_hash, old_2fa=N
             try:
                 proxy = get_random_proxy()
                 proxy_dict = create_proxy_dict(proxy) if proxy else None
+                if proxy_dict:
+                    log_time(f"使用代理: {proxy['ip']}:{proxy['port']}")
+                else:
+                    log_time("未使用代理")
                 
                 client = TelegramClient(
                     use_session,
@@ -713,6 +728,7 @@ async def check_session_2fa(session_file, json_file, api_id, api_hash, old_2fa=N
         log_time(f"获取用户信息耗时: {time.time() - me_start:.2f}秒")
         
         result["phone"] = me.phone
+        log_time(f"账号手机号: {me.phone}")
         
         if not final_json_file:
             generated_json = await generate_json_for_session(
@@ -725,42 +741,54 @@ async def check_session_2fa(session_file, json_file, api_id, api_hash, old_2fa=N
         
         if mode == "auto":
             old = result["original_2fa"]
+            log_time(f"自动识别模式，旧密码值: {old if old else 'None'}")
             if old:
+                log_time(f"尝试修改2FA: 旧密码={old}, 新密码={new_2fa}")
                 success, msg = await change_2fa(client, old, new_2fa)
                 if success:
                     result["status"] = "success"
                     result["message"] = f"2FA已修改"
                     result["new_2fa_set"] = new_2fa
+                    log_time(f"修改成功")
                 else:
                     if "旧密码错误" in msg:
+                        log_time(f"旧密码错误，尝试重置2FA")
                         reset_success, reset_msg = await reset_2fa(client, me.phone)
                         if reset_success:
                             result["status"] = "reset_success"
                             result["message"] = "旧密码错误，已重置"
                             result["new_2fa_set"] = None
+                            log_time(f"重置成功")
                         else:
                             result["status"] = "reset_failed"
                             result["message"] = "旧密码错误，重置失败"
+                            log_time(f"重置失败: {reset_msg}")
                     else:
                         result["status"] = "failed"
                         result["message"] = msg
+                        log_time(f"修改失败: {msg}")
             else:
+                log_time(f"未检测到旧密码，尝试直接设置新2FA: {new_2fa}")
                 try:
                     await client.edit_2fa(new_password=new_2fa)
                     result["status"] = "success"
                     result["message"] = "2FA已设置"
                     result["new_2fa_set"] = new_2fa
+                    log_time(f"设置成功")
                 except Exception as e:
                     result["status"] = "failed"
                     result["message"] = f"设置失败: {str(e)[:50]}"
+                    log_time(f"设置失败: {e}")
         
         else:
+            log_time(f"手动输入模式，使用用户提供的旧密码: {old_2fa if old_2fa else 'None'}")
             if old_2fa:
                 success, msg = await change_2fa(client, old_2fa, new_2fa)
                 if success:
                     result["status"] = "success"
                     result["message"] = f"2FA已修改"
                     result["new_2fa_set"] = new_2fa
+                    log_time(f"修改成功")
                 else:
                     if "旧密码错误" in msg:
                         reset_success, reset_msg = await reset_2fa(client, me.phone)
@@ -768,21 +796,27 @@ async def check_session_2fa(session_file, json_file, api_id, api_hash, old_2fa=N
                             result["status"] = "reset_success"
                             result["message"] = "旧密码错误，已重置"
                             result["new_2fa_set"] = None
+                            log_time(f"重置成功")
                         else:
                             result["status"] = "reset_failed"
                             result["message"] = "旧密码错误，重置失败"
+                            log_time(f"重置失败: {reset_msg}")
                     else:
                         result["status"] = "failed"
                         result["message"] = msg
+                        log_time(f"修改失败: {msg}")
             else:
+                log_time(f"无旧密码，尝试直接设置新2FA: {new_2fa}")
                 try:
                     await client.edit_2fa(new_password=new_2fa)
                     result["status"] = "success"
                     result["message"] = "2FA已设置"
                     result["new_2fa_set"] = new_2fa
+                    log_time(f"设置成功")
                 except Exception as e:
                     result["status"] = "failed"
                     result["message"] = f"设置失败: {str(e)[:50]}"
+                    log_time(f"设置失败: {e}")
         
         total_time = time.time() - start_time
         log_time(f"账号 {os.path.basename(session_file)} 2FA处理完成，状态={result['status']}，总耗时={total_time:.2f}秒")
@@ -790,15 +824,19 @@ async def check_session_2fa(session_file, json_file, api_id, api_hash, old_2fa=N
     except SessionPasswordNeededError:
         result["status"] = "failed"
         result["message"] = "需要2FA验证"
+        log_time("需要2FA验证")
     except FloodWaitError as e:
         result["status"] = "failed"
         result["message"] = f"等待{e.seconds}秒"
+        log_time(f"Flood wait {e.seconds}秒")
     except asyncio.TimeoutError:
         result["status"] = "failed"
         result["message"] = "网络操作超时"
+        log_time("网络操作超时")
     except Exception as e:
         result["status"] = "failed"
         result["message"] = f"错误: {str(e)[:30]}"
+        log_time(f"异常: {e}")
     finally:
         if client:
             disconnect_start = time.time()
@@ -809,6 +847,7 @@ async def check_session_2fa(session_file, json_file, api_id, api_hash, old_2fa=N
             log_time(f"已清理临时目录: {temp_dir}")
     
     return result
+
 
 def get_total_size(path):
     total = 0
