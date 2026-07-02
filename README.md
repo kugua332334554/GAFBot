@@ -1,14 +1,3 @@
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-# GAFBot
-
-GAFBot is a multi-functional bot designed for Telegram account sellers.Use python.
-
-GAFBot是针对Telegram号商的多功能Bot。使用Python语言。
-
-<img width="617" height="346" alt="image" src="https://github.com/user-attachments/assets/999a6cae-d787-46f1-ad7a-87d75a231169" />
-
-
-
 <div align="center">
   <table border="0">
     <tr>
@@ -22,6 +11,19 @@ GAFBot是针对Telegram号商的多功能Bot。使用Python语言。
     </tr>
   </table>
 </div>
+
+
+
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+# GAFBot
+
+GAFBot is a multi-functional bot designed for Telegram account sellers.Use python.
+
+GAFBot是针对Telegram号商的多功能Bot。使用Python语言。
+
+<img width="617" height="346" alt="image" src="https://github.com/user-attachments/assets/999a6cae-d787-46f1-ad7a-87d75a231169" />
+
+
 
 # 管理员命令
 
