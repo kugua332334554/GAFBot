@@ -15,7 +15,7 @@ GAFBot是针对Telegram号商的多功能Bot。使用Python语言。
       <td align="center" bgcolor="#1a1a1a" style="border: 2px solid #d4af37; border-radius: 10px; padding: 20px;">
         <p><b>✨ 米哈亲邻 ✨</b></p>
         <hr />
-       <img width="320" height="320" alt="image" src="<img width="770" height="766" alt="image" src="https://github.com/user-attachments/assets/98d7cf51-1cee-4a53-a86f-d7d140f405d3" />
+       <img width="320" height="320" alt="image" src="https://github.com/user-attachments/assets/98d7cf51-1cee-4a53-a86f-d7d140f405d3" />
         <p><font color="#d4af37" size="5"><b>特别牛逼的米哈先生莅临</b></font></p>
         <p><small>Telegram @mrmiha</small></p>
       </td>
