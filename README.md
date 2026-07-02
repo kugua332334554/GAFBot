@@ -7,6 +7,22 @@ GAFBot是针对Telegram号商的多功能Bot。使用Python语言。
 
 <img width="617" height="346" alt="image" src="https://github.com/user-attachments/assets/999a6cae-d787-46f1-ad7a-87d75a231169" />
 
+
+
+<div align="center">
+  <table border="0">
+    <tr>
+      <td align="center" bgcolor="#1a1a1a" style="border: 2px solid #d4af37; border-radius: 10px; padding: 20px;">
+        <p><b>✨ 米哈亲邻 ✨</b></p>
+        <hr />
+       <img width="320" height="320" alt="image" src="<img width="770" height="766" alt="image" src="https://github.com/user-attachments/assets/98d7cf51-1cee-4a53-a86f-d7d140f405d3" />
+        <p><font color="#d4af37" size="5"><b>特别牛逼的米哈先生莅临</b></font></p>
+        <p><small>Telegram @mrmiha</small></p>
+      </td>
+    </tr>
+  </table>
+</div>
+
 # 管理员命令
 
 /vip + id 添加VIP
