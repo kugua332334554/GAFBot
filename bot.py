@@ -51,7 +51,7 @@ from passkey import (
     show_passkey_menu, handle_passkey_selection, handle_passkey_document,
     user_passkey_states, PASSKEY_BACK
 )
-
+from shaireg import handle_regtime_document
 load_dotenv()
 TOKEN = os.getenv("BOT_TOKEN")
 RAW_MESSAGE = os.getenv("START_MESSAGE")
@@ -66,7 +66,7 @@ OKPAY_PAYED = os.getenv("OKPAY_PAYED")
 OKPAY_COST = os.getenv("OKPAY_COST")
 MERGE_PACKS_BACK = os.getenv("MERGE_PACKS_BACK", "").replace('\\n', '\n')
 BACK_BUTTON_EMOJI_ID = "5877629862306385808"
-
+REGTIME_BACK = os.getenv("REGTIME_BACK", "").replace('\\n', '\n')
 if isinstance(ACCOUNT_LOGIN_BACK, str):
     ACCOUNT_LOGIN_BACK = ACCOUNT_LOGIN_BACK.replace('\\n', '\n')
 
@@ -248,6 +248,18 @@ async def process_button_callback(update: Update, context: ContextTypes.DEFAULT_
         login_handlers[user_id] = LoginHandler(user_id, update.effective_chat.id)
         user_states[user_id] = "waiting_phone"
 
+    elif data == "check_regtime":
+        formatted_text = REGTIME_BACK
+        keyboard = [[create_back_button()]]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await query.edit_message_text(
+            text=formatted_text,
+            parse_mode=ParseMode.HTML,
+            reply_markup=reply_markup
+        )
+        user_states[user_id] = "waiting_regtime_zip"
+
+
     elif data == "qr_login":
         await query.answer()
         await context.bot.send_message(
@@ -382,6 +394,10 @@ async def process_handle_message(update: Update, context: ContextTypes.DEFAULT_T
     if user_data.get("status") != "vip":
         await update.message.reply_text(UN_ACTIVE_MSG, parse_mode=ParseMode.HTML)
         return
+    if user_states.get(user_id) == "waiting_regtime_zip":
+        await handle_regtime_document(update, context, user_id, InlineKeyboardMarkup([[create_back_button()]]))
+        user_states.pop(user_id, None)
+        return
     if user_id not in user_states:
         return
 
@@ -430,59 +446,63 @@ async def process_handle_message(update: Update, context: ContextTypes.DEFAULT_T
                 
 async def process_handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = str(update.effective_user.id)
+    state = user_states.get(user_id)
+
     if user_states.get(user_id) == "waiting_qr_login":
         await update.message.reply_text(
             " 请先完成扫码登录，无需上传文件",
             parse_mode=ParseMode.HTML
         )
         return
-    
-    all_users = load_all_users()
-    user_data = all_users.get(user_id, {})
-    
+
     if user_id in user_recovery_states and user_recovery_states[user_id].get("state") == "waiting_zip":
         await handle_recovery_document(update, context, user_id)
         return
-    
+
     if user_id in user_ban_states:
         await handle_ban_document(update, context, user_id)
         return
-    
+
     if '2fa_state' in context.user_data and context.user_data['2fa_state'] == "waiting_2fa_zip":
         await handle_2fa_document(update, context)
         return
-    
+
     if user_id in user_convert_states and user_convert_states[user_id].get("waiting_zip"):
         await handle_convert_document(update, context, user_id)
         return
-    
+
     if user_id in user_api_states and user_api_states[user_id].get("waiting_zip"):
         await handle_api_document(update, context, user_id)
         return
-    
+
     if user_id in user_clean_states and user_clean_states[user_id].get("waiting_zip"):
         await handle_clean_document(update, context, user_id)
         return
-    
+
     if user_id in user_unpack_states and user_unpack_states[user_id].get("waiting_zip"):
         await handle_unpack_document(update, context, user_id)
         return
-    
+
     if user_id in user_passkey_states and user_passkey_states[user_id].get("waiting_zip"):
         await handle_passkey_document(update, context, user_id)
         return
-    
+
     if user_states.get(user_id) == "waiting_destroy_zip":
         await handle_destroy_document(update, context, user_id)
         user_states.pop(user_id, None)
         return
-    
+
+    all_users = load_all_users()
+    user_data = all_users.get(user_id, {})
     if user_data.get("status") != "vip":
         await update.message.reply_text(UN_ACTIVE_MSG, parse_mode=ParseMode.HTML)
         return
-    
-    state = user_states.get(user_id)
-    
+
+    if state == "waiting_regtime_zip":
+        await handle_regtime_document(update, context, user_id, InlineKeyboardMarkup([[create_back_button()]]))
+        user_states.pop(user_id, None)
+        return
+
     if state == "waiting_shaihuo":
         await handle_shaihuo_document(update, context, user_id, user_states)
     elif state == "waiting_merge_packs":
@@ -503,6 +523,7 @@ async def process_handle_document(update: Update, context: ContextTypes.DEFAULT_
             parse_mode='HTML',
             reply_markup=reply_markup
         )
+
 
 async def check_pay_status(context: ContextTypes.DEFAULT_TYPE):
     job = context.job
@@ -780,6 +801,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
              btn("拆包工具", "unpack_tool", "5877540355187937244")],
             [btn("销毁会话", "destroy_session", "5879937509579820068"),
              btn("Passkey功能", "passkey_menu", "6008118472066732010")],
+            [btn("注册时间", "check_regtime", "5900104897885376843")],
         ]
         
         for i in range(1, 4):
