@@ -1,6 +1,7 @@
 anyio
 APScheduler
 blinker
+aiohttp
 certifi
 charset-normalizer
 click
