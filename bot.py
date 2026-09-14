@@ -46,6 +46,7 @@ from fangzhaohui import (
     show_prevent_recovery, handle_recovery_document, handle_recovery_2fa_input,
     handle_recovery_skip, user_recovery_states
 )
+from task_engine import task_stop_callback
 from xiaohui import handle_destroy_document, DESTROY_BACK
 from passkey import (
     show_passkey_menu, handle_passkey_selection, handle_passkey_document,
@@ -406,10 +407,7 @@ async def process_button_callback(update: Update, context: ContextTypes.DEFAULT_
 
     elif data in ["passkey_create", "passkey_login"]:
         await handle_passkey_selection(update, context)
-        
-        
-        
-        
+
 async def process_handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = str(update.effective_user.id)
     text = update.message.text
@@ -903,11 +901,12 @@ if __name__ == '__main__':
     app = ApplicationBuilder().token(TOKEN).post_init(post_init).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("lang", lang_command))
-    app.add_handler(CallbackQueryHandler(button_callback))
     app.add_handler(CommandHandler("vip", set_vip))
     app.add_handler(CommandHandler("unvip", remove_vip))
     app.add_handler(CommandHandler("gb", broadcast))
-    
+    app.add_handler(CallbackQueryHandler(task_stop_callback, pattern="^task_stop$"))
+    app.add_handler(CallbackQueryHandler(button_callback))
+
     async def text_message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_id = str(update.effective_user.id)
         if user_id == ADMIN_ID and context.user_data.get("awaiting_broadcast"):

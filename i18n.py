@@ -110,7 +110,15 @@ STRINGS = {
     "shaihuo.alive_caption": {"zh": "存活账号", "tw": "存活帳號", "en": "Alive accounts"},
     "shaihuo.frozen_caption": {"zh": "冻结账号", "tw": "凍結帳號", "en": "Frozen accounts"},
     "shaihuo.dead_caption": {"zh": "失效账号", "tw": "失效帳號", "en": "Dead accounts"},
+    "shaihuo.pending": {"zh": "未完成", "tw": "未完成", "en": "Pending"},
+    "shaihuo.pending_caption": {"zh": "未完成账号(未处理)", "tw": "未完成帳號(未處理)", "en": "Pending accounts (unprocessed)"},
     "shaihuo.task_done": {"zh": "筛活任务完成", "tw": "篩活任務完成", "en": "Active check task complete"},
+    "task.stopping": {"zh": "正在终止任务，请稍候打包已完成的账号…", "tw": "正在終止任務，請稍候打包已完成的帳號…", "en": "Stopping task, packing completed accounts…"},
+    "task.no_running": {"zh": "当前没有正在运行的任务", "tw": "當前沒有正在運行的任務", "en": "No running task"},
+    "task.running": {"zh": "任务运行中，可点击按钮提前停止（已完成账号将打包发送）", "tw": "任務運行中，可點擊按鈕提前停止（已完成帳號將打包發送）", "en": "Task running, tap button to stop early (completed accounts will be packed)"},
+    "task.stop_button": {"zh": "⏹ 停止任务", "tw": "⏹ 停止任務", "en": "⏹ Stop Task"},
+    "task.stopped": {"zh": "任务已停止，已打包完成的账号。", "tw": "任務已停止，已打包完成的帳號。", "en": "Task stopped, completed accounts packed."},
+    "task.stop_failed": {"zh": "停止失败或没有运行中的任务", "tw": "停止失敗或沒有運行中的任務", "en": "Stop failed or no running task"},
 
     # ---- 修改2FA ----
     "2fa.manual": {"zh": "手动输入", "tw": "手動輸入", "en": "Manual Input"},

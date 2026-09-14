@@ -20,6 +20,7 @@ from opentele.tl import TelegramClient as OpenteleClient
 from opentele.api import API
 from opentele.td import TDesktop
 from i18n import tr, lang_from_update, get_env_i18n
+from task_engine import BatchTask, run_batch, arm_timeout, pack_and_send
 
 load_dotenv()
 logger = logging.getLogger(__name__)
@@ -512,28 +513,7 @@ async def process_recovery_task(update: Update, context: ContextTypes.DEFAULT_TY
 
     try:
         result_temp = tempfile.mkdtemp()
-
-        task = asyncio.create_task(
-            _process_recovery_internal(update, context, user_id, session_files, extract_dir, two_fa, status_msg, result_temp)
-        )
-
-        await asyncio.wait_for(task, timeout=MAX_TASK_TIME)
-
-    except asyncio.TimeoutError:
-        if task and not task.done():
-            task.cancel()
-            try:
-                await task
-            except:
-                pass
-
-        await context.bot.send_message(
-            chat_id=update.effective_chat.id,
-            text=f"<tg-emoji emoji-id='5778527486270770928'>⚠️</tg-emoji> {tr('recovery.timeout_msg', lang)} ({MAX_TASK_TIME}{tr('recovery.seconds', lang)})",
-            parse_mode='HTML',
-            reply_markup=InlineKeyboardMarkup([[create_back_button(lang=lang)]])
-        )
-
+        await _process_recovery_internal(update, context, user_id, session_files, extract_dir, two_fa, status_msg, result_temp)
     except Exception as e:
         await context.bot.send_message(
             chat_id=update.effective_chat.id,
@@ -565,22 +545,13 @@ async def _process_recovery_internal(update, context, user_id, session_files, ex
     failed_count = 0
     results = []
 
-    for idx, session_path in enumerate(session_files, 1):
-        try:
-            await status_msg.edit_text(
-                f"""<tg-emoji emoji-id="5839200986022812209">🔄</tg-emoji> <b>{tr('recovery.in_progress', lang)}</b>
+    pending_dir = os.path.join(result_temp, "pending")
+    os.makedirs(pending_dir, exist_ok=True)
 
-{tr('shaihuo.progress', lang)}: {idx}/{len(session_files)}
-{tr('shaihuo.success', lang)}: {success_count} | {tr('2fa.failed', lang)}: {failed_count}
-<tg-emoji emoji-id="5775887550262546277">⏳</tg-emoji> {tr('recovery.processing', lang)} {os.path.basename(session_path)}...""",
-                parse_mode='HTML'
-            )
-        except:
-            pass
-
+    async def process_one(item, task):
+        session_path = item
         session_basename = os.path.basename(session_path)
         session_name = os.path.splitext(session_basename)[0]
-
         json_path = None
         base_dir = os.path.dirname(session_path)
         possible_json = os.path.join(base_dir, f"{session_name}.json")
@@ -591,39 +562,64 @@ async def _process_recovery_internal(update, context, user_id, session_files, ex
                 if f"{session_name}.json" in files:
                     json_path = os.path.join(root, f"{session_name}.json")
                     break
-
         try:
             result = await asyncio.wait_for(
                 process_single_account(session_path, json_path, two_fa, user_id, session_name),
                 timeout=120
             )
         except asyncio.TimeoutError:
-            result = {
-                "session_name": session_name,
-                "status": "failed",
-                "message": "处理超时（超过120秒）",
-                "new_session_path": None,
-                "new_json_path": None
-            }
-            logger.error(f"账号 {session_name} 处理超时")
-
+            result = {"session_name": session_name, "status": "failed", "message": "处理超时（超过120秒）", "new_session_path": None, "new_json_path": None}
         if result["status"] == "success":
             target_dir = success_dir
-            success_count += 1
             if result["new_session_path"] and os.path.exists(result["new_session_path"]):
                 shutil.copy2(result["new_session_path"], os.path.join(target_dir, os.path.basename(result["new_session_path"])))
             if result["new_json_path"] and os.path.exists(result["new_json_path"]):
                 shutil.copy2(result["new_json_path"], os.path.join(target_dir, os.path.basename(result["new_json_path"])))
         else:
             target_dir = failed_dir
-            failed_count += 1
             if os.path.exists(session_path):
                 shutil.copy2(session_path, os.path.join(target_dir, session_basename))
             if json_path and os.path.exists(json_path):
                 shutil.copy2(json_path, os.path.join(target_dir, os.path.basename(json_path)))
+        return {"category": "success" if result["status"] == "success" else "fail", "name": session_name}
 
-        results.append(result)
-        await asyncio.sleep(0.1)
+    task = BatchTask(user_id, update.effective_chat.id, session_files, "recovery")
+    watchdog = arm_timeout(task, MAX_TASK_TIME)
+
+    async def on_progress(t):
+        c = {"success": 0, "fail": 0}
+        for r in t.done:
+            if r.get("category") in c:
+                c[r["category"]] += 1
+        try:
+            await status_msg.edit_text(
+                f"""<tg-emoji emoji-id="5839200986022812209">🔄</tg-emoji> <b>{tr('recovery.in_progress', lang)}</b>
+
+{tr('shaihuo.progress', lang)}: {t.completed}/{len(session_files)}
+{tr('shaihuo.success', lang)}: {c['success']} | {tr('2fa.failed', lang)}: {c['fail']}
+<tg-emoji emoji-id="5775887550262546277">⏳</tg-emoji> {tr('recovery.processing', lang)}...""",
+                parse_mode='HTML'
+            )
+        except:
+            pass
+
+    await run_batch(update, context, task, process_one, on_progress=on_progress)
+
+    if not watchdog.done():
+        watchdog.cancel()
+
+    if task.stopped:
+        for item in task.remaining_pending():
+            session_path = item
+            session_basename = os.path.basename(session_path)
+            session_name = os.path.splitext(session_basename)[0]
+            pdir = os.path.join(pending_dir, session_name)
+            os.makedirs(pdir, exist_ok=True)
+            if os.path.exists(session_path):
+                shutil.copy2(session_path, os.path.join(pdir, session_basename))
+            json_path = os.path.join(os.path.dirname(session_path), f"{session_name}.json")
+            if os.path.exists(json_path):
+                shutil.copy2(json_path, os.path.join(pdir, os.path.basename(json_path)))
 
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
     success_zip = None
@@ -647,63 +643,25 @@ async def _process_recovery_internal(update, context, user_id, session_files, ex
                     arcname = os.path.relpath(file_path, failed_dir)
                     zipf.write(file_path, arcname)
 
-    result_text = f"""<tg-emoji emoji-id="5909201569898827582">✅</tg-emoji> <b>{tr('recovery.done', lang)}</b>
+    def result_text_fn(cats, pending):
+        return f"""<tg-emoji emoji-id="5909201569898827582">✅</tg-emoji> <b>{tr('recovery.done', lang)}</b>
 
 {tr('recovery.total_accounts', lang)}: {len(session_files)}
-<tg-emoji emoji-id="5920052658743283381">✅</tg-emoji> {tr('shaihuo.success', lang)}: {success_count}
-<tg-emoji emoji-id="5922712343011135025">❌</tg-emoji> {tr('2fa.failed', lang)}: {failed_count}"""
+<tg-emoji emoji-id="5920052658743283381">✅</tg-emoji> {tr('shaihuo.success', lang)}: {cats['success']}
+<tg-emoji emoji-id="5922712343011135025">❌</tg-emoji> {tr('2fa.failed', lang)}: {cats['fail']}
+<tg-emoji emoji-id="5846008814129649022">⏸️</tg-emoji> {tr('shaihuo.pending', lang)}: {pending}"""
 
-    await context.bot.send_message(
-        chat_id=update.effective_chat.id,
-        text=result_text,
-        parse_mode='HTML'
+    await pack_and_send(
+        context, update, task,
+        categories={
+            "success": (success_dir, f"recovery_success_{datetime.now().strftime('%Y%m%d_%H%M%S')}.zip", lambda n: f"<b>{tr('recovery.success_caption', lang)} ({n}{tr('recovery.accounts_unit', lang)})</b>"),
+            "fail": (failed_dir, f"recovery_failed_{datetime.now().strftime('%Y%m%d_%H%M%S')}.zip", lambda n: f"<b>{tr('recovery.failed_caption', lang)} ({n}{tr('recovery.accounts_unit', lang)})</b>"),
+        },
+        admins=(ADMIN_ID.split(',') if ADMIN_ID else []), lang=lang, result_text_fn=result_text_fn, pending_dir=pending_dir
     )
 
-    if success_zip:
-        with open(success_zip, 'rb') as f:
-            await context.bot.send_document(
-                chat_id=update.effective_chat.id,
-                document=f,
-                filename=f"recovery_success_{timestamp}.zip",
-                caption=f"<b>{tr('recovery.success_caption', lang)} ({success_count}{tr('recovery.accounts_unit', lang)})</b>",
-                parse_mode='HTML'
-            )
-
-    if failed_zip:
-        with open(failed_zip, 'rb') as f:
-            await context.bot.send_document(
-                chat_id=update.effective_chat.id,
-                document=f,
-                filename=f"recovery_failed_{timestamp}.zip",
-                caption=f"<b>{tr('recovery.failed_caption', lang)} ({failed_count}{tr('recovery.accounts_unit', lang)})</b>",
-                parse_mode='HTML'
-            )
-
-    if ADMIN_ID:
-        for admin in ADMIN_ID.split(','):
-            admin = admin.strip()
-            if not admin:
-                continue
-            try:
-                await context.bot.send_message(
-                    chat_id=admin,
-                    text=f"""<tg-emoji emoji-id="5909201569898827582">📢</tg-emoji> <b>{tr('recovery.done', lang)}</b>
-
-{tr('admin.user', lang)}: <code>{user_id}</code>
-{tr('recovery.total_accounts', lang)}: {len(session_files)}
-<tg-emoji emoji-id="5920052658743283381">✅</tg-emoji>{tr('shaihuo.success', lang)}: {success_count} |<tg-emoji emoji-id="5922712343011135025">❌</tg-emoji> {tr('2fa.failed', lang)}: {failed_count}""",
-                    parse_mode='HTML'
-                )
-                if success_zip:
-                    with open(success_zip, 'rb') as f:
-                        await context.bot.send_document(chat_id=admin, document=f)
-                if failed_zip:
-                    with open(failed_zip, 'rb') as f:
-                        await context.bot.send_document(chat_id=admin, document=f)
-            except Exception as e:
-                pass
-
     try:
+        await status_msg.delete()
         await status_msg.delete()
     except:
         pass

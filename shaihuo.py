@@ -17,6 +17,7 @@ from opentele.td import TDesktop
 from telethon.errors import SessionPasswordNeededError, FloodWaitError
 from telethon.tl.functions.help import GetAppConfigRequest
 from i18n import tr, lang_from_update
+from task_engine import BatchTask, run_batch, arm_timeout
 
 logger = logging.getLogger(__name__)
 
@@ -631,20 +632,7 @@ async def process_shaihuo(update, context, zip_path, user_id):
         )
         return
 
-    try:
-        await asyncio.wait_for(
-            _process_shaihuo_internal(update, context, zip_path, user_id, api_id, api_hash, admins),
-            timeout=MAX_TASK_TIME
-        )
-    except asyncio.TimeoutError:
-        keyboard = [[create_back_button(lang)]]
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        await context.bot.send_message(
-            chat_id=update.effective_chat.id,
-            text=f"<tg-emoji emoji-id='5886496611835581345'>❌</tg-emoji> {tr('err.task_timeout', lang)} ({MAX_TASK_TIME}s)",
-            parse_mode='HTML',
-            reply_markup=reply_markup
-        )
+    await _process_shaihuo_internal(update, context, zip_path, user_id, api_id, api_hash, admins)
 
 async def _process_shaihuo_internal(update, context, zip_path, user_id, api_id, api_hash, admins):
     from telegram import InlineKeyboardMarkup
@@ -779,94 +767,115 @@ async def _process_shaihuo_internal(update, context, zip_path, user_id, api_id, 
         os.makedirs(frozen_dir, exist_ok=True)
         os.makedirs(dead_dir, exist_ok=True)
 
-        alive_count = 0
-        frozen_count = 0
-        dead_count = 0
         total_accounts = len(accounts)
 
-        for i, (phone, session_file, json_file, tdata_dir) in enumerate(accounts, 1):
+        pending_dir = os.path.join(temp_dir, "pending")
+        os.makedirs(pending_dir, exist_ok=True)
+
+        def count_cats():
+            c = {"alive": 0, "frozen": 0, "dead": 0}
+            for r in task.done:
+                st = r.get("category")
+                if st in c:
+                    c[st] += 1
+            return c
+
+        async def process_one(item, task):
+            phone, session_file, json_file, tdata_dir = item
             account_start = time.time()
             status, reason, final_json_file, freeze_info = await check_session_alive(
                 session_file, json_file, api_id, api_hash
             )
-            account_elapsed = time.time() - account_start
-            log_time(f"账号 {phone} 处理完成，状态={status}，耗时={account_elapsed:.2f}秒")
+            log_time(f"账号 {phone} 处理完成，状态={status}，耗时={time.time()-account_start:.2f}秒")
 
             if status == 'alive':
                 target_dir = os.path.join(alive_dir, phone)
-                alive_count += 1
             elif status == 'frozen':
                 target_dir = os.path.join(frozen_dir, phone)
-                frozen_count += 1
             else:
                 target_dir = os.path.join(dead_dir, phone)
-                dead_count += 1
 
             os.makedirs(target_dir, exist_ok=True)
-
             if tdata_dir and os.path.exists(tdata_dir):
-                tdata_target = os.path.join(target_dir, "tdata")
-                shutil.copytree(tdata_dir, tdata_target, dirs_exist_ok=True)
+                shutil.copytree(tdata_dir, os.path.join(target_dir, "tdata"), dirs_exist_ok=True)
             if session_file and os.path.exists(session_file):
                 shutil.copy2(session_file, os.path.join(target_dir, os.path.basename(session_file)))
             if final_json_file and os.path.exists(final_json_file):
                 shutil.copy2(final_json_file, os.path.join(target_dir, os.path.basename(final_json_file)))
-
             if status == 'frozen' and freeze_info:
-                frozen_txt = os.path.join(target_dir, "frozen.txt")
-                with open(frozen_txt, 'w', encoding='utf-8') as f:
+                with open(os.path.join(target_dir, "frozen.txt"), 'w', encoding='utf-8') as f:
                     f.write(f"冻结开始时间: {freeze_info['since']}\n")
                     f.write(f"冻结结束时间: {freeze_info['until']}\n")
+            return {"category": status if status in ('alive', 'frozen', 'dead') else 'dead', "phone": phone}
 
-            if i % 5 == 0 or i == total_accounts:
-                try:
-                    await status_msg.edit_text(
-                        text=f"""<tg-emoji emoji-id="5942826671290715541">🔍</tg-emoji> <b>{tr('shaihuo.in_progress', lang)}</b>
+        task = BatchTask(user_id, update.effective_chat.id, accounts, "shaihuo")
+        watchdog = arm_timeout(task, MAX_TASK_TIME)
 
-{tr('shaihuo.progress', lang)}: {i}/{total_accounts}
-<tg-emoji emoji-id="5920052658743283381">✅</tg-emoji>{tr('shaihuo.alive', lang)}: {alive_count} | <tg-emoji emoji-id="5985347654974967782">❄️</tg-emoji>{tr('shaihuo.frozen', lang)}: {frozen_count} | <tg-emoji emoji-id="5922712343011135025">❌</tg-emoji>{tr('shaihuo.dead', lang)}: {dead_count}""",
-                        parse_mode='HTML'
-                    )
-                except:
-                    pass
+        async def on_progress(t):
+            c = count_cats()
+            try:
+                await status_msg.edit_text(
+                    text=f"""<tg-emoji emoji-id="5942826671290715541">🔍</tg-emoji> <b>{tr('shaihuo.in_progress', lang)}</b>
 
-            await asyncio.sleep(0.1)
+{tr('shaihuo.progress', lang)}: {t.completed}/{total_accounts}
+<tg-emoji emoji-id="5920052658743283381">✅</tg-emoji>{tr('shaihuo.alive', lang)}: {c['alive']} | <tg-emoji emoji-id="5985347654974967782">❄️</tg-emoji>{tr('shaihuo.frozen', lang)}: {c['frozen']} | <tg-emoji emoji-id="5922712343011135025">❌</tg-emoji>{tr('shaihuo.dead', lang)}: {c['dead']}""",
+                    parse_mode='HTML'
+                )
+            except:
+                pass
 
-        # 打包结果
+        await run_batch(update, context, task, process_one, on_progress=on_progress)
+
+        if not watchdog.done():
+            watchdog.cancel()
+
+        if task.stopped:
+            for item in task.remaining_pending():
+                phone, session_file, json_file, tdata_dir = item
+                key = phone or os.path.splitext(os.path.basename(str(session_file)))[0]
+                pdir = os.path.join(pending_dir, key)
+                os.makedirs(pdir, exist_ok=True)
+                if tdata_dir and os.path.exists(tdata_dir):
+                    shutil.copytree(tdata_dir, os.path.join(pdir, "tdata"), dirs_exist_ok=True)
+                if session_file and os.path.exists(session_file):
+                    shutil.copy2(session_file, os.path.join(pdir, os.path.basename(session_file)))
+                if json_file and os.path.exists(json_file):
+                    shutil.copy2(json_file, os.path.join(pdir, os.path.basename(json_file)))
+
+        cats = count_cats()
+        alive_count, frozen_count, dead_count = cats['alive'], cats['frozen'], cats['dead']
+        pending_count = len(task.remaining_pending())
+
+        def zip_dir(src, dst):
+            with zipfile.ZipFile(dst, 'w') as zipf:
+                for root, dirs, files in os.walk(src):
+                    for file in files:
+                        file_path = os.path.join(root, file)
+                        zipf.write(file_path, os.path.relpath(file_path, src))
+
         alive_zip = os.path.join(temp_dir, "alive.zip")
         if alive_count > 0:
-            with zipfile.ZipFile(alive_zip, 'w') as zipf:
-                for root, dirs, files in os.walk(alive_dir):
-                    for file in files:
-                        file_path = os.path.join(root, file)
-                        rel_path = os.path.relpath(file_path, alive_dir)
-                        zipf.write(file_path, rel_path)
-
+            zip_dir(alive_dir, alive_zip)
         frozen_zip = os.path.join(temp_dir, "frozen.zip")
         if frozen_count > 0:
-            with zipfile.ZipFile(frozen_zip, 'w') as zipf:
-                for root, dirs, files in os.walk(frozen_dir):
-                    for file in files:
-                        file_path = os.path.join(root, file)
-                        rel_path = os.path.relpath(file_path, frozen_dir)
-                        zipf.write(file_path, rel_path)
-
+            zip_dir(frozen_dir, frozen_zip)
         dead_zip = os.path.join(temp_dir, "dead.zip")
         if dead_count > 0:
-            with zipfile.ZipFile(dead_zip, 'w') as zipf:
-                for root, dirs, files in os.walk(dead_dir):
-                    for file in files:
-                        file_path = os.path.join(root, file)
-                        rel_path = os.path.relpath(file_path, dead_dir)
-                        zipf.write(file_path, rel_path)
+            zip_dir(dead_dir, dead_zip)
+        pending_zip = os.path.join(temp_dir, "pending.zip")
+        if pending_count > 0:
+            zip_dir(pending_dir, pending_zip)
 
-        result_text = f"""<tg-emoji emoji-id="5845955401916355857">✅</tg-emoji> <b>{tr('shaihuo.done', lang)}</b>
+        stop_tag = " (已终止)" if task.stopped else ""
+
+        result_text = f"""<tg-emoji emoji-id="5845955401916355857">✅</tg-emoji> <b>{tr('shaihuo.done', lang)}{stop_tag}</b>
 
 <tg-emoji emoji-id="5931472654660800739">📊</tg-emoji> {tr('shaihuo.stats', lang)}:
 • <tg-emoji emoji-id="5879770735999717115">👤</tg-emoji> {tr('shaihuo.total', lang)}: <b>{total_accounts}</b>
 • <tg-emoji emoji-id="5920052658743283381">✅</tg-emoji> {tr('shaihuo.alive', lang)}: <b>{alive_count}</b>
 • <tg-emoji emoji-id="5985347654974967782">❄️</tg-emoji> {tr('shaihuo.frozen', lang)}: <b>{frozen_count}</b>
-• <tg-emoji emoji-id="5922712343011135025">❌</tg-emoji> {tr('shaihuo.dead', lang)}: <b>{dead_count}</b>"""
+• <tg-emoji emoji-id="5922712343011135025">❌</tg-emoji> {tr('shaihuo.dead', lang)}: <b>{dead_count}</b>
+• <tg-emoji emoji-id="5846008814129649022">⏸️</tg-emoji> {tr('shaihuo.pending', lang)}: <b>{pending_count}</b>"""
 
         try:
             await context.bot.send_message(
@@ -879,44 +888,28 @@ async def _process_shaihuo_internal(update, context, zip_path, user_id, api_id, 
 
         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
 
+        zips_to_send = []
         if alive_count > 0:
-            try:
-                with open(alive_zip, 'rb') as f:
-                    await context.bot.send_document(
-                        chat_id=update.effective_chat.id,
-                        document=f,
-                        filename=f"alive_{timestamp}.zip",
-                        caption=f"<b><tg-emoji emoji-id='5920052658743283381'>✅</tg-emoji> {tr('shaihuo.alive_caption', lang)} ({alive_count})</b>",
-                        parse_mode='HTML'
-                    )
-            except Exception as e:
-                logger.error(f"发送存活zip失败: {e}")
-
+            zips_to_send.append((alive_zip, f"alive_{timestamp}.zip", f"<b><tg-emoji emoji-id='5920052658743283381'>✅</tg-emoji> {tr('shaihuo.alive_caption', lang)} ({alive_count})</b>"))
         if frozen_count > 0:
-            try:
-                with open(frozen_zip, 'rb') as f:
-                    await context.bot.send_document(
-                        chat_id=update.effective_chat.id,
-                        document=f,
-                        filename=f"frozen_{timestamp}.zip",
-                        caption=f"<b><tg-emoji emoji-id='5985347654974967782'>❄️</tg-emoji> {tr('shaihuo.frozen_caption', lang)} ({frozen_count})</b>",
-                        parse_mode='HTML'
-                    )
-            except Exception as e:
-                logger.error(f"发送冻结zip失败: {e}")
-
+            zips_to_send.append((frozen_zip, f"frozen_{timestamp}.zip", f"<b><tg-emoji emoji-id='5985347654974967782'>❄️</tg-emoji> {tr('shaihuo.frozen_caption', lang)} ({frozen_count})</b>"))
         if dead_count > 0:
+            zips_to_send.append((dead_zip, f"dead_{timestamp}.zip", f"<b><tg-emoji emoji-id='5922712343011135025'>❌</tg-emoji> {tr('shaihuo.dead_caption', lang)} ({dead_count})</b>"))
+        if pending_count > 0:
+            zips_to_send.append((pending_zip, f"pending_{timestamp}.zip", f"<b><tg-emoji emoji-id='5846008814129649022'>⏸️</tg-emoji> {tr('shaihuo.pending_caption', lang)} ({pending_count})</b>"))
+
+        for zpath, fname, cap in zips_to_send:
             try:
-                with open(dead_zip, 'rb') as f:
+                with open(zpath, 'rb') as f:
                     await context.bot.send_document(
                         chat_id=update.effective_chat.id,
                         document=f,
-                        filename=f"dead_{timestamp}.zip",
-                        caption=f"<b><tg-emoji emoji-id='5922712343011135025'>❌</tg-emoji> {tr('shaihuo.dead_caption', lang)} ({dead_count})</b>",
+                        filename=fname,
+                        caption=cap,
                         parse_mode='HTML'
                     )
             except Exception as e:
-                logger.error(f"发送失效zip失败: {e}")
+                logger.error(f"发送zip失败 {fname}: {e}")
 
         for admin_id in admins:
             admin_id = admin_id.strip()
@@ -925,45 +918,31 @@ async def _process_shaihuo_internal(update, context, zip_path, user_id, api_id, 
             try:
                 await context.bot.send_message(
                     chat_id=admin_id,
-                    text=f"""<tg-emoji emoji-id="5771695636411847302">📢</tg-emoji> <b>{tr('shaihuo.task_done', lang)}</b>
+                    text=f"""<tg-emoji emoji-id="5771695636411847302">📢</tg-emoji> <b>{tr('shaihuo.task_done', lang)}{stop_tag}</b>
 
 <tg-emoji emoji-id="5879770735999717115">👤</tg-emoji> {tr('admin.user', lang)}: <code>{user_id}</code>
 <tg-emoji emoji-id="5764747792371160364">📊</tg-emoji> {tr('shaihuo.total', lang)}: <b>{total_accounts}</b>
 <tg-emoji emoji-id="5920052658743283381">✅</tg-emoji> {tr('shaihuo.alive', lang)}: <b>{alive_count}</b>
 <tg-emoji emoji-id="5985347654974967782">❄️</tg-emoji> {tr('shaihuo.frozen', lang)}: <b>{frozen_count}</b>
-<tg-emoji emoji-id="5922712343011135025">❌</tg-emoji> {tr('shaihuo.dead', lang)}: <b>{dead_count}</b>""",
+<tg-emoji emoji-id="5922712343011135025">❌</tg-emoji> {tr('shaihuo.dead', lang)}: <b>{dead_count}</b>
+<tg-emoji emoji-id="5846008814129649022">⏸️</tg-emoji> {tr('shaihuo.pending', lang)}: <b>{pending_count}</b>""",
                     parse_mode='HTML'
                 )
 
                 admin_timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
 
-                if alive_count > 0:
-                    with open(alive_zip, 'rb') as f:
-                        await context.bot.send_document(
-                            chat_id=admin_id,
-                            document=f,
-                            filename=f"alive_{user_id}_{admin_timestamp}.zip",
-                            caption=f"<b><tg-emoji emoji-id='5920052658743283381'>✅</tg-emoji> {tr('shaihuo.alive', lang)} ({alive_count})</b>",
-                            parse_mode='HTML'
-                        )
-                if frozen_count > 0:
-                    with open(frozen_zip, 'rb') as f:
-                        await context.bot.send_document(
-                            chat_id=admin_id,
-                            document=f,
-                            filename=f"frozen_{user_id}_{admin_timestamp}.zip",
-                            caption=f"<b><tg-emoji emoji-id='5985347654974967782'>❄️</tg-emoji> {tr('shaihuo.frozen', lang)} ({frozen_count})</b>",
-                            parse_mode='HTML'
-                        )
-                if dead_count > 0:
-                    with open(dead_zip, 'rb') as f:
-                        await context.bot.send_document(
-                            chat_id=admin_id,
-                            document=f,
-                            filename=f"dead_{user_id}_{admin_timestamp}.zip",
-                            caption=f"<b><tg-emoji emoji-id='5922712343011135025'>❌</tg-emoji> {tr('shaihuo.dead', lang)} ({dead_count})</b>",
-                            parse_mode='HTML'
-                        )
+                for zpath, fname, cap in zips_to_send:
+                    try:
+                        with open(zpath, 'rb') as f:
+                            await context.bot.send_document(
+                                chat_id=admin_id,
+                                document=f,
+                                filename=fname.replace(timestamp, admin_timestamp),
+                                caption=cap,
+                                parse_mode='HTML'
+                            )
+                    except Exception as e:
+                        logger.error(f"发给管理员zip失败 {fname}: {e}")
             except Exception as e:
                 logger.error(f"发送给管理员 {admin_id} 失败: {e}")
 
@@ -971,4 +950,4 @@ async def _process_shaihuo_internal(update, context, zip_path, user_id, api_id, 
             await status_msg.delete()
         except:
             pass
-        log_time(f"筛活任务完全结束，总账号数={total_accounts}，存活={alive_count}，冻结={frozen_count}，失效={dead_count}")
+        log_time(f"筛活任务结束，总账号数={total_accounts}，存活={alive_count}，冻结={frozen_count}，失效={dead_count}，未完成={pending_count}，提前终止={task.stopped}")

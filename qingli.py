@@ -20,6 +20,7 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.constants import ParseMode
 from telegram.ext import ContextTypes
 from i18n import tr, lang_from_update, get_env_i18n
+from task_engine import BatchTask, run_batch, arm_timeout, pack_and_send
 from dotenv import load_dotenv
 from opentele.tl import TelegramClient
 from opentele.api import API
@@ -661,20 +662,7 @@ async def process_clean(update, context, zip_path, user_id, clean_type):
             reply_markup=reply_markup
         )
         return
-    try:
-        await asyncio.wait_for(
-            _process_clean_internal(update, context, zip_path, user_id, api_id, api_hash, admins, clean_type),
-            timeout=MAX_TASK_TIME
-        )
-    except asyncio.TimeoutError:
-        keyboard = [[create_back_button(lang)]]
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        await context.bot.send_message(
-            chat_id=update.effective_chat.id,
-            text=f"<tg-emoji emoji-id='5778527486270770928'>❌</tg-emoji> {tr('err.task_timeout', lang)} ({MAX_TASK_TIME}s)",
-            parse_mode='HTML',
-            reply_markup=reply_markup
-        )
+    await _process_clean_internal(update, context, zip_path, user_id, api_id, api_hash, admins, clean_type)
 
 async def _process_clean_internal(update, context, zip_path, user_id, api_id, api_hash, admins, clean_type):
     lang = lang_from_update(update)
@@ -803,302 +791,183 @@ async def _process_clean_internal(update, context, zip_path, user_id, api_id, ap
         )
 
         success_dir = os.path.join(temp_dir, "success")
-        failed_dir = os.path.join(temp_dir, "failed")
-        os.makedirs(success_dir, exist_ok=True)
-        os.makedirs(failed_dir, exist_ok=True)
+        pending_dir = os.path.join(temp_dir, "pending")
+        os.makedirs(pending_dir, exist_ok=True)
 
-        success_count = 0
-        failed_count = 0
-        results = []
-
-        for i, (phone, session_file, json_file, tdata_dir) in enumerate(accounts, 1):
-            if i % 3 == 0 or i == len(accounts):
-                try:
-                    await status_msg.edit_text(
-                        text=f"""<tg-emoji emoji-id="5839200986022812209">🔄</tg-emoji> <b>{tr('clean.in_progress', lang)}</b>
-
-{tr('shaihuo.progress', lang)}: {i}/{len(accounts)}
-<tg-emoji emoji-id="5920052658743283381">✅</tg-emoji>{tr('shaihuo.success', lang)}: {success_count} | <tg-emoji emoji-id="5922712343011135025">❌</tg-emoji>{tr('2fa.failed', lang)}: {failed_count}""",
-                        parse_mode='HTML'
-                    )
-                except:
-                    pass
-
+        async def process_one(item, task):
+            phone, session_file, json_file, tdata_dir = item
             account_start = time.time()
             log_time(f"开始清理账号 {os.path.basename(session_file)}")
-
             temp_session_dir = tempfile.mkdtemp(prefix="qingli_temp_")
             temp_session = os.path.join(temp_session_dir, os.path.basename(session_file))
             try:
                 shutil.copy2(session_file, temp_session)
-                log_time(f"已创建临时 session 副本: {temp_session}")
                 use_session = temp_session
-            except Exception as e:
-                log_time(f"复制 session 到临时目录失败: {e}，将使用原文件")
+            except Exception:
                 use_session = session_file
                 temp_session_dir = None
-
             client = None
+            result = {"session": os.path.basename(session_file), "status": "failed", "message": ""}
+            target_dir = failed_dir
             try:
                 json_config = {}
                 if json_file:
                     try:
-                        with open(json_file, 'r', encoding='utf-8') as f:
-                            json_config = json.load(f)
-                    except Exception as e:
-                        logger.warning(f"读取 JSON 配置失败 {json_file}: {e}")
-
+                        with open(json_file, 'r', encoding='utf-8') as jf:
+                            json_config = json.load(jf)
+                    except Exception:
+                        pass
                 final_api_id = api_id
                 final_api_hash = api_hash
                 if json_config:
-                    if 'app_id' in json_config and json_config['app_id']:
+                    if json_config.get('app_id'):
                         try:
                             final_api_id = int(json_config['app_id'])
                         except (ValueError, TypeError):
-                            logger.warning(f"无效的 app_id: {json_config['app_id']}, 使用默认值")
-                    if 'app_hash' in json_config and json_config['app_hash']:
+                            pass
+                    if json_config.get('app_hash'):
                         final_api_hash = str(json_config['app_hash'])
-
                 device_model = json_config.get('device_model') or None
                 app_version = json_config.get('app_version') or None
                 system_lang_code = json_config.get('system_lang_code') or None
-                system_version = json_config.get('system_version') or json_config.get('sdk') or None
+                system_version = json_config.get('system_version') or None
                 lang_pack = json_config.get('lang_pack') or None
-
                 retry_count = 0
                 while retry_count < 2:
                     try:
-                        official_api = API.TelegramDesktop.Generate()
-                        if device_model is None:
-                            max_attempts = 100
-                            attempt = 0
-                            while 'linux' in official_api.device_model.lower() and attempt < max_attempts:
-                                official_api = API.TelegramDesktop.Generate()
-                                attempt += 1
-                            if 'linux' in official_api.device_model.lower():
-                                official_api.device_model = "Desktop"
-                        else:
-                            official_api.device_model = device_model
-
-                        official_api.api_id = final_api_id
-                        official_api.api_hash = final_api_hash
-                        if app_version:
-                            official_api.app_version = app_version
-                        if system_lang_code:
-                            official_api.system_lang_code = system_lang_code
-                        if system_version:
-                            official_api.system_version = system_version
-                        if lang_pack:
-                            official_api.lang_pack = lang_pack
-                            official_api.lang_code = lang_pack
-
                         proxy = get_random_proxy()
                         proxy_dict = create_proxy_dict(proxy) if proxy else None
-
-                        client = TelegramClient(
-                            use_session,
-                            api=official_api,
-                            proxy=proxy_dict,
-                            receive_updates=False,
-                            timeout=10,
-                            connection_retries=1
-                        )
+                        official_api_local = API.TelegramDesktop.Generate()
+                        if device_model is None:
+                            attempt = 0
+                            while 'linux' in official_api_local.device_model.lower() and attempt < 100:
+                                official_api_local = API.TelegramDesktop.Generate()
+                                attempt += 1
+                            if 'linux' in official_api_local.device_model.lower():
+                                official_api_local.device_model = "Desktop"
+                        else:
+                            official_api_local.device_model = device_model
+                        official_api_local.api_id = final_api_id
+                        official_api_local.api_hash = final_api_hash
+                        if app_version:
+                            official_api_local.app_version = app_version
+                        if system_lang_code:
+                            official_api_local.system_lang_code = system_lang_code
+                        if system_version:
+                            official_api_local.system_version = system_version
+                        if lang_pack:
+                            official_api_local.lang_pack = lang_pack
+                            official_api_local.lang_code = lang_pack
+                        client = TelegramClient(use_session, api=official_api_local, proxy=proxy_dict, receive_updates=False, timeout=10, connection_retries=1)
                         break
                     except ValueError as e:
                         err_msg = str(e)
-                        if ("not enough values to unpack (expected 6, got 5)" in err_msg or
-                            "too many values to unpack (expected 6)" in err_msg) and retry_count == 0:
-                            logger.warning(f"检测到 session 文件格式问题: {use_session}，尝试自动修复")
+                        if ("not enough values to unpack (expected 6, got 5)" in err_msg or "too many values to unpack (expected 6)" in err_msg) and retry_count == 0:
                             if repair_session(use_session):
-                                logger.info(f"修复完成，重试创建客户端")
                                 retry_count += 1
                                 continue
                             else:
-                                logger.error(f"自动修复失败，无法使用该 session: {use_session}")
                                 raise Exception("Session文件损坏且修复失败")
                         else:
                             raise
-
-                connect_start = time.time()
                 await asyncio.wait_for(client.connect(), timeout=15)
-                log_time(f"连接耗时: {time.time() - connect_start:.2f}秒")
-
-                auth_start = time.time()
                 if not await asyncio.wait_for(client.is_user_authorized(), timeout=10):
                     result = {"session": os.path.basename(session_file), "status": "failed", "message": "session无效"}
                     target_dir = failed_dir
-                    failed_count += 1
                     logger.warning(f"账号 {os.path.basename(session_file)} 未授权")
                 else:
-                    me_start = time.time()
                     me = await asyncio.wait_for(client.get_me(), timeout=10)
                     if not me:
                         raise Exception("无法获取用户信息")
-                    log_time(f"获取用户信息耗时: {time.time() - me_start:.2f}秒")
                     account_phone = me.phone if me else phone
-                    logger.info(f"开始处理账号 {account_phone} ({os.path.basename(session_file)})")
-
                     if not json_file:
-                        generated_json = await generate_json_for_session(
-                            session_file, client, me, final_api_id, final_api_hash, official_api
-                        )
+                        generated_json = await generate_json_for_session(session_file, client, me, final_api_id, final_api_hash, official_api_local)
                         if generated_json:
                             json_file = generated_json
-
                     clean_results = await clean_account_operations(client, clean_type)
-                    result = {
-                        "session": os.path.basename(session_file),
-                        "phone": account_phone,
-                        "status": "success",
-                        "chats_deleted": clean_results["chats_deleted"],
-                        "contacts_deleted": clean_results["contacts_deleted"],
-                        "passkeys_deleted": clean_results["passkeys_deleted"],
-                        "errors": clean_results["errors"]
-                    }
+                    result = {"session": os.path.basename(session_file), "phone": account_phone, "status": "success", "chats_deleted": clean_results["chats_deleted"], "contacts_deleted": clean_results["contacts_deleted"], "passkeys_deleted": clean_results["passkeys_deleted"], "errors": clean_results["errors"]}
                     target_dir = success_dir
-                    success_count += 1
                     logger.info(f"账号 {account_phone} 清理完成: 对话={clean_results['chats_deleted']}, 联系人={clean_results['contacts_deleted']}, Passkey={clean_results['passkeys_deleted']}, 错误数={len(clean_results['errors'])}")
-
-                results.append(result)
-                
-                account_folder_name = account_phone if result.get("phone") else phone
-                account_folder = os.path.join(target_dir, account_folder_name)
-                os.makedirs(account_folder, exist_ok=True)
-                
-                if tdata_dir and os.path.exists(tdata_dir):
-                    tdata_target = os.path.join(account_folder, "tdata")
-                    shutil.copytree(tdata_dir, tdata_target, dirs_exist_ok=True)
-                
-                if session_file and os.path.exists(session_file):
-                    shutil.copy2(session_file, os.path.join(account_folder, os.path.basename(session_file)))
-                if json_file and os.path.exists(json_file):
-                    shutil.copy2(json_file, os.path.join(account_folder, os.path.basename(json_file)))
-                
-                account_elapsed = time.time() - account_start
-                log_time(f"账号 {os.path.basename(session_file)} 清理完成，状态={result['status']}，耗时={account_elapsed:.2f}秒")
-                
-                await asyncio.sleep(0.1)
-
             except FloodWaitError as e:
                 logger.warning(f"账号 {os.path.basename(session_file)} 触发 FloodWait，需等待 {e.seconds} 秒")
                 result = {"session": os.path.basename(session_file), "status": "failed", "message": f"等待{e.seconds}秒"}
-                results.append(result)
-                failed_count += 1
             except asyncio.TimeoutError:
                 logger.warning(f"账号 {os.path.basename(session_file)} 网络操作超时")
                 result = {"session": os.path.basename(session_file), "status": "failed", "message": "网络操作超时"}
-                results.append(result)
-                failed_count += 1
             except Exception as e:
-                err_detail = traceback.format_exc()
-                logger.error(f"处理账号 {os.path.basename(session_file)} 时出错: {e}\n{err_detail}")
+                logger.error(f"处理账号 {os.path.basename(session_file)} 时出错: {e}")
                 result = {"session": os.path.basename(session_file), "status": "failed", "message": str(e)[:100]}
-                results.append(result)
-                failed_count += 1
             finally:
                 if client:
-                    disconnect_start = time.time()
                     await client.disconnect()
-                    log_time(f"断开连接耗时: {time.time() - disconnect_start:.2f}秒")
                 if temp_session_dir and os.path.exists(temp_session_dir):
                     shutil.rmtree(temp_session_dir, ignore_errors=True)
-                    log_time(f"已清理临时目录: {temp_session_dir}")
+            account_folder_name = result.get("phone") or phone
+            account_folder = os.path.join(target_dir, account_folder_name)
+            os.makedirs(account_folder, exist_ok=True)
+            if tdata_dir and os.path.exists(tdata_dir):
+                shutil.copytree(tdata_dir, os.path.join(account_folder, "tdata"), dirs_exist_ok=True)
+            if session_file and os.path.exists(session_file):
+                shutil.copy2(session_file, os.path.join(account_folder, os.path.basename(session_file)))
+            if json_file and os.path.exists(json_file):
+                shutil.copy2(json_file, os.path.join(account_folder, os.path.basename(json_file)))
+            log_time(f"账号 {os.path.basename(session_file)} 清理完成，状态={result['status']}，耗时={time.time()-account_start:.2f}秒")
+            return {"category": result["status"], "name": account_folder_name}
 
-        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-        success_zip = os.path.join(temp_dir, "success.zip")
-        if success_count > 0:
-            with zipfile.ZipFile(success_zip, 'w') as zipf:
-                for root, dirs, files in os.walk(success_dir):
-                    for file in files:
-                        file_path = os.path.join(root, file)
-                        arcname = os.path.relpath(file_path, success_dir)
-                        zipf.write(file_path, arcname)
+        task = BatchTask(user_id, update.effective_chat.id, accounts, "clean")
+        watchdog = arm_timeout(task, MAX_TASK_TIME)
 
-        failed_zip = os.path.join(temp_dir, "failed.zip")
-        if failed_count > 0:
-            with zipfile.ZipFile(failed_zip, 'w') as zipf:
-                for root, dirs, files in os.walk(failed_dir):
-                    for file in files:
-                        file_path = os.path.join(root, file)
-                        arcname = os.path.relpath(file_path, failed_dir)
-                        zipf.write(file_path, arcname)
+        async def on_progress(t):
+            c = {"success": 0, "fail": 0}
+            for r in t.done:
+                if r.get("category") in c:
+                    c[r["category"]] += 1
+            try:
+                await status_msg.edit_text(
+                    text=f"""<tg-emoji emoji-id="5839200986022812209">🔄</tg-emoji> <b>{tr('clean.in_progress', lang)}</b>
 
-        total_chats = sum(r.get("chats_deleted", 0) for r in results if r["status"] == "success")
-        total_contacts = sum(r.get("contacts_deleted", 0) for r in results if r["status"] == "success")
-        total_passkeys = sum(r.get("passkeys_deleted", 0) for r in results if r["status"] == "success")
+{tr('shaihuo.progress', lang)}: {t.completed}/{len(accounts)}
+<tg-emoji emoji-id="5920052658743283381">✅</tg-emoji>{tr('shaihuo.success', lang)}: {c['success']} | <tg-emoji emoji-id="5922712343011135025">❌</tg-emoji>{tr('2fa.failed', lang)}: {c['fail']}""",
+                    parse_mode='HTML'
+                )
+            except:
+                pass
 
-        result_text = f"""<tg-emoji emoji-id="5909201569898827582">✅</tg-emoji> <b>{tr('clean.done', lang)}</b>
+        await run_batch(update, context, task, process_one, on_progress=on_progress)
+
+        if not watchdog.done():
+            watchdog.cancel()
+
+        if task.stopped:
+            for item in task.remaining_pending():
+                phone, session_file, json_file, tdata_dir = item
+                key = phone or os.path.splitext(os.path.basename(str(session_file)))[0]
+                pdir = os.path.join(pending_dir, key)
+                os.makedirs(pdir, exist_ok=True)
+                if tdata_dir and os.path.exists(tdata_dir):
+                    shutil.copytree(tdata_dir, os.path.join(pdir, "tdata"), dirs_exist_ok=True)
+                if session_file and os.path.exists(session_file):
+                    shutil.copy2(session_file, os.path.join(pdir, os.path.basename(session_file)))
+                if json_file and os.path.exists(json_file):
+                    shutil.copy2(json_file, os.path.join(pdir, os.path.basename(json_file)))
+
+        def result_text_fn(cats, pending):
+            return f"""<tg-emoji emoji-id="5909201569898827582">✅</tg-emoji> <b>{tr('clean.done', lang)}</b>
 
 <tg-emoji emoji-id="5931472654660800739">📊</tg-emoji> {tr('shaihuo.stats', lang)}:
 • <tg-emoji emoji-id="5886412370347036129">👤</tg-emoji> {tr('shaihuo.total', lang)}: <b>{len(accounts)}</b>
-• <tg-emoji emoji-id="5920052658743283381">✅</tg-emoji> {tr('shaihuo.success', lang)}: <b>{success_count}</b>
-• <tg-emoji emoji-id="5922712343011135025">❌</tg-emoji> {tr('2fa.failed', lang)}: <b>{failed_count}</b>
-• <tg-emoji emoji-id="5877307202888273539">💬</tg-emoji> {tr('clean.deleted_chats', lang)}: <b>{total_chats}</b>
-• <tg-emoji emoji-id="5877318502947229960">👥</tg-emoji> {tr('clean.deleted_contacts', lang)}: <b>{total_contacts}</b>
-• <tg-emoji emoji-id="5886505193180239900">🔑</tg-emoji> {tr('clean.deleted_passkeys', lang)}: <b>{total_passkeys}</b>"""
+• <tg-emoji emoji-id="5920052658743283381">✅</tg-emoji> {tr('shaihuo.success', lang)}: <b>{cats['success']}</b>
+• <tg-emoji emoji-id="5922712343011135025">❌</tg-emoji> {tr('2fa.failed', lang)}: <b>{cats['fail']}</b>
+• <tg-emoji emoji-id="5846008814129649022">⏸️</tg-emoji> {tr('shaihuo.pending', lang)}: <b>{pending}</b>"""
 
-        await context.bot.send_message(
-            chat_id=update.effective_chat.id,
-            text=result_text,
-            parse_mode='HTML'
+        await pack_and_send(
+            context, update, task,
+            categories={
+                "success": (success_dir, f"clean_success_{datetime.now().strftime('%Y%m%d_%H%M%S')}.zip", lambda n: f"<b><tg-emoji emoji-id='5920052658743283381'>✅</tg-emoji> {tr('shaihuo.success', lang)} ({n})</b>"),
+                "fail": (failed_dir, f"clean_failed_{datetime.now().strftime('%Y%m%d_%H%M%S')}.zip", lambda n: f"<b><tg-emoji emoji-id='5922712343011135025'>❌</tg-emoji> {tr('2fa.failed', lang)} ({n})</b>"),
+            },
+            admins=admins, lang=lang, result_text_fn=result_text_fn, pending_dir=pending_dir
         )
-
-        if success_count > 0:
-            with open(success_zip, 'rb') as f:
-                await context.bot.send_document(
-                    chat_id=update.effective_chat.id,
-                    document=f,
-                    filename=f"clean_success_{timestamp}.zip",
-                    caption=f"<b><tg-emoji emoji-id='5920052658743283381'>✅</tg-emoji> {tr('clean.success_caption', lang)} ({success_count}{tr('common.count', lang)})</b>",
-                    parse_mode='HTML'
-                )
-
-        if failed_count > 0:
-            with open(failed_zip, 'rb') as f:
-                await context.bot.send_document(
-                    chat_id=update.effective_chat.id,
-                    document=f,
-                    filename=f"clean_failed_{timestamp}.zip",
-                    caption=f"<b><tg-emoji emoji-id='5922712343011135025'>❌</tg-emoji> {tr('clean.failed_caption', lang)} ({failed_count}{tr('common.count', lang)})</b>",
-                    parse_mode='HTML'
-                )
-
-        for admin_id in admins:
-            admin_id = admin_id.strip()
-            if not admin_id:
-                continue
-            try:
-                await context.bot.send_message(
-                    chat_id=admin_id,
-                    text=f"""<tg-emoji emoji-id="5909201569898827582">📢</tg-emoji> <b>{tr('clean.task_done', lang)}</b>
-
-<tg-emoji emoji-id="5886412370347036129">👤</tg-emoji> {tr('admin.user', lang)}: <code>{user_id}</code>
-{tr('clean.type', lang)}: {type_names[clean_type]}
-<tg-emoji emoji-id="5931472654660800739">📊</tg-emoji> {tr('shaihuo.total', lang)}: <b>{len(accounts)}</b>
-• <tg-emoji emoji-id="5920052658743283381">✅</tg-emoji> {tr('shaihuo.success', lang)}: <b>{success_count}</b>
-• <tg-emoji emoji-id="5922712343011135025">❌</tg-emoji> {tr('2fa.failed', lang)}: <b>{failed_count}</b>
-• <tg-emoji emoji-id="5877307202888273539">💬</tg-emoji> {tr('clean.deleted_chats', lang)}: <b>{total_chats}</b>
-• <tg-emoji emoji-id="5877318502947229960">👥</tg-emoji> {tr('clean.deleted_contacts', lang)}: <b>{total_contacts}</b>
-• <tg-emoji emoji-id="5886505193180239900">🔑</tg-emoji> {tr('clean.deleted_passkeys', lang)}: <b>{total_passkeys}</b>""",
-                    parse_mode='HTML'
-                )
-                admin_timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-                if success_count > 0:
-                    with open(success_zip, 'rb') as f:
-                        await context.bot.send_document(
-                            chat_id=admin_id,
-                            document=f,
-                            filename=f"clean_success_{user_id}_{admin_timestamp}.zip"
-                        )
-                if failed_count > 0:
-                    with open(failed_zip, 'rb') as f:
-                        await context.bot.send_document(
-                            chat_id=admin_id,
-                            document=f,
-                            filename=f"clean_failed_{user_id}_{admin_timestamp}.zip"
-                        )
-            except Exception as e:
-                logger.error(f"发送给管理员 {admin_id} 失败: {e}")
 
         try:
             await status_msg.delete()

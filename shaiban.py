@@ -14,6 +14,7 @@ from telegram.ext import ContextTypes
 
 logger = logging.getLogger(__name__)
 from i18n import tr, lang_from_update, get_env_i18n
+from task_engine import BatchTask, run_batch, arm_timeout
 BACK_BUTTON_EMOJI_ID = "5877629862306385808"
 CHECK_BAN_BACK = os.getenv("CHECK_BAN_BACK", "").replace('\\n', '\n')
 MAX_PHONES = 100
@@ -167,53 +168,68 @@ async def process_ban_check(update: Update, context: ContextTypes.DEFAULT_TYPE, 
     )
     
     with tempfile.TemporaryDirectory() as temp_dir:
-        banned, unbanned = [], []
-        
-        for i, phone in enumerate(phones, 1):
-            proxy = None
+        list_lock = asyncio.Lock()
+
+        async def on_progress(task):
+            c = {"unbanned": 0, "banned": 0}
+            for r in task.done:
+                cat = r.get("category")
+                if cat in c:
+                    c[cat] += 1
+            try:
+                await status_msg.edit_text(
+                    f"<tg-emoji emoji-id='5443127283898405358'>🔍</tg-emoji> {tr('ban.progress', lang)}: {task.completed}/{len(phones)}\n"
+                    f"<tg-emoji emoji-id='5922712343011135025'>🚫</tg-emoji> {tr('ban.banned', lang)}: {c['banned']} | "
+                    f"<tg-emoji emoji-id='5920052658743283381'>✅</tg-emoji> {tr('ban.normal', lang)}: {c['unbanned']}",
+                    parse_mode=ParseMode.HTML
+                )
+            except:
+                pass
+
+        async def process_one(item, task):
+            phone = item
             client = None
+            result = "unbanned"
             try:
                 proxy = get_random_proxy()
                 proxy_dict = create_proxy_dict(proxy) if proxy else None
-                
                 client = TelegramClient(
-                    tempfile.mktemp(dir=temp_dir), 
-                    api_id, 
+                    tempfile.mktemp(dir=temp_dir),
+                    api_id,
                     api_hash,
                     proxy=proxy_dict
                 )
                 await client.connect()
-                
                 try:
                     await client.send_code_request(phone)
-                    unbanned.append(phone)
+                    result = "unbanned"
                 except FloodWaitError as e:
-                    unbanned.append(phone)
+                    result = "unbanned"
                     await asyncio.sleep(e.seconds)
                 except Exception as e:
                     error_str = str(e).lower()
                     if "phone_number_invalid" in error_str or "phone_number_banned" in error_str:
-                        banned.append(phone)
+                        result = "banned"
                     else:
-                        unbanned.append(phone)
-                
+                        result = "unbanned"
                 await client.disconnect()
-                
-                if i % 10 == 0 or i == len(phones):
-                    await status_msg.edit_text(
-                        f"<tg-emoji emoji-id='5443127283898405358'>🔍</tg-emoji> {tr('ban.progress', lang)}: {i}/{len(phones)}\n"
-                        f"<tg-emoji emoji-id='5922712343011135025'>🚫</tg-emoji> {tr('ban.banned', lang)}: {len(banned)} | "
-                        f"<tg-emoji emoji-id='5920052658743283381'>✅</tg-emoji> {tr('ban.normal', lang)}: {len(unbanned)}",
-                        parse_mode=ParseMode.HTML
-                    )
-                await asyncio.sleep(2)
             except Exception as e:
                 logger.error(f"检测 {phone} 失败: {e}")
-                unbanned.append(phone)
+                result = "unbanned"
                 if client:
                     try: await client.disconnect()
                     except: pass
-        
+            return {"category": result, "phone": phone}
+
+        task = BatchTask(user_id, update.effective_chat.id, phones, module_name="shaiban")
+        wd = arm_timeout(task, int(os.getenv("TASK_TIMEOUT", "1800")))
+        await run_batch(update, context, task, process_one, on_progress=on_progress)
+        wd.cancel()
+
+        banned = [r["phone"] for r in task.done if r.get("category") == "banned"]
+        unbanned = [r["phone"] for r in task.done if r.get("category") == "unbanned"]
+        pending = task.remaining_pending()
+
         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
         banned_file = os.path.join(temp_dir, "banned.txt")
         unbanned_file = os.path.join(temp_dir, "unbanned.txt")
@@ -222,8 +238,12 @@ async def process_ban_check(update: Update, context: ContextTypes.DEFAULT_TYPE, 
             f.write('\n'.join(banned))
         with open(unbanned_file, 'w', encoding='utf-8') as f:
             f.write('\n'.join(unbanned))
-        
-        result_text = f"""<tg-emoji emoji-id='5909201569898827582'>✅</tg-emoji> <b>{tr('ban.done', lang)}</b>
+        if pending:
+            with open(unbanned_file, 'a', encoding='utf-8') as f:
+                f.write('\n\n# 未完成 (已终止):\n' + '\n'.join(pending))
+
+        stop_tag = " (已终止)" if (task.stopped or pending) else ""
+        result_text = f"""<tg-emoji emoji-id='5909201569898827582'>✅</tg-emoji> <b>{tr('ban.done', lang)}</b>{stop_tag}
 
 <tg-emoji emoji-id='5931472654660800739'>📊</tg-emoji> {tr('shaihuo.stats', lang)}:
 • <tg-emoji emoji-id='5886412370347036129'>📱</tg-emoji> {tr('ban.total', lang)}: <b>{len(phones)}</b>
@@ -258,7 +278,7 @@ async def process_ban_check(update: Update, context: ContextTypes.DEFAULT_TYPE, 
             try:
                 await context.bot.send_message(
                     chat_id=admin_id,
-                    text=f"""<tg-emoji emoji-id='5909201569898827582'>📢</tg-emoji> <b>{tr('ban.task_done', lang)}</b>
+                    text=f"""<tg-emoji emoji-id='5909201569898827582'>📢</tg-emoji> <b>{tr('ban.task_done', lang)}</b>{stop_tag}
 
 <tg-emoji emoji-id='5886412370347036129'>👤</tg-emoji> {tr('admin.user', lang)} ID: <code>{user_id}</code>
 <tg-emoji emoji-id='5931472654660800739'>📊</tg-emoji> {tr('shaihuo.stats', lang)}:

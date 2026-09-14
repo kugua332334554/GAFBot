@@ -17,6 +17,7 @@ from telethon.errors import FloodWaitError, SessionPasswordNeededError
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from dotenv import load_dotenv
 from i18n import tr, lang_from_update
+from task_engine import BatchTask, run_batch, arm_timeout, pack_and_send
 
 load_dotenv()
 logger = logging.getLogger(__name__)
@@ -636,149 +637,85 @@ async def _process_destroy_internal(update, context, zip_path, user_id, api_id, 
         )
 
         success_dir = os.path.join(temp_dir, "success")
-        failed_dir = os.path.join(temp_dir, "failed")
-        os.makedirs(success_dir, exist_ok=True)
-        os.makedirs(failed_dir, exist_ok=True)
+        pending_dir = os.path.join(temp_dir, "pending")
+        os.makedirs(pending_dir, exist_ok=True)
 
-        success_count = 0
-        failed_count = 0
-
-        for i, (phone, session_file, json_file, tdata_dir) in enumerate(accounts, 1):
-            account_start = time.time()
-            log_time(f"开始销毁账号 {os.path.basename(session_file)}")
-            
-            if i % 5 == 0 or i == len(accounts):
-                try:
-                    await status_msg.edit_text(
-                        text=f"""<tg-emoji emoji-id="5942826671290715541">🗑️</tg-emoji> <b>{tr('destroy.in_progress', lang)}</b>
-
-{tr('shaihuo.progress', lang)}: {i}/{len(accounts)}
-<tg-emoji emoji-id="5920052658743283381">✅</tg-emoji>{tr('shaihuo.success', lang)}: {success_count} | <tg-emoji emoji-id="5886496611835581345">❌</tg-emoji>{tr('2fa.failed', lang)}: {failed_count}""",
-                        parse_mode='HTML'
-                    )
-                except:
-                    pass
-
+        async def process_one(item, task):
+            phone, session_file, json_file, tdata_dir = item
             success, reason, account_phone = await destroy_session(session_file, json_file, api_id, api_hash, tdata_dir)
             phone_number = account_phone or phone or os.path.splitext(os.path.basename(session_file))[0]
+            category = "success" if success else "fail"
             target_dir = success_dir if success else failed_dir
             account_folder = os.path.join(target_dir, phone_number)
             os.makedirs(account_folder, exist_ok=True)
-
             if tdata_dir and os.path.exists(tdata_dir):
-                tdata_target = os.path.join(account_folder, "tdata")
-                shutil.copytree(tdata_dir, tdata_target, dirs_exist_ok=True)
-
+                shutil.copytree(tdata_dir, os.path.join(account_folder, "tdata"), dirs_exist_ok=True)
             try:
                 shutil.copy2(session_file, os.path.join(account_folder, os.path.basename(session_file)))
                 if json_file and os.path.exists(json_file):
                     shutil.copy2(json_file, os.path.join(account_folder, os.path.basename(json_file)))
             except:
                 pass
-
             if not success:
-                error_file = os.path.join(account_folder, "error.txt")
-                with open(error_file, 'w', encoding='utf-8') as f:
-                    f.write(f"销毁失败原因: {reason}\n")
-                    f.write(f"时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+                with open(os.path.join(account_folder, "error.txt"), 'w', encoding='utf-8') as ef:
+                    ef.write(f"销毁失败原因: {reason}\n")
+                    ef.write(f"时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+            return {"category": category, "name": phone_number}
 
-            if success:
-                success_count += 1
-            else:
-                failed_count += 1
-            
-            account_elapsed = time.time() - account_start
-            log_time(f"账号 {os.path.basename(session_file)} 销毁完成，状态={'成功' if success else '失败'}，耗时={account_elapsed:.2f}秒")
+        task = BatchTask(user_id, update.effective_chat.id, accounts, "destroy")
+        watchdog = arm_timeout(task, MAX_TASK_TIME)
 
-            await asyncio.sleep(0.1)
+        async def on_progress(t):
+            c = {"success": 0, "fail": 0}
+            for r in t.done:
+                if r.get("category") in c:
+                    c[r["category"]] += 1
+            try:
+                await status_msg.edit_text(
+                    text=f"""<tg-emoji emoji-id="5942826671290715541">🗑️</tg-emoji> <b>{tr('destroy.in_progress', lang)}</b>
 
-        success_zip = os.path.join(temp_dir, "success.zip")
-        if success_count > 0:
-            with zipfile.ZipFile(success_zip, 'w') as zipf:
-                for root, dirs, files in os.walk(success_dir):
-                    for file in files:
-                        file_path = os.path.join(root, file)
-                        arcname = os.path.relpath(file_path, success_dir)
-                        zipf.write(file_path, arcname)
+{tr('shaihuo.progress', lang)}: {t.completed}/{len(accounts)}
+<tg-emoji emoji-id="5920052658743283381">✅</tg-emoji>{tr('shaihuo.success', lang)}: {c['success']} | <tg-emoji emoji-id="5886496611835581345">❌</tg-emoji>{tr('2fa.failed', lang)}: {c['fail']}""",
+                    parse_mode='HTML'
+                )
+            except:
+                pass
 
-        failed_zip = os.path.join(temp_dir, "failed.zip")
-        if failed_count > 0:
-            with zipfile.ZipFile(failed_zip, 'w') as zipf:
-                for root, dirs, files in os.walk(failed_dir):
-                    for file in files:
-                        file_path = os.path.join(root, file)
-                        arcname = os.path.relpath(file_path, failed_dir)
-                        zipf.write(file_path, arcname)
+        await run_batch(update, context, task, process_one, on_progress=on_progress)
 
-        result_text = f"""<tg-emoji emoji-id="5879937509579820068">🗑️</tg-emoji> <b>{tr('destroy.done', lang)}</b>
+        if not watchdog.done():
+            watchdog.cancel()
+
+        if task.stopped:
+            for item in task.remaining_pending():
+                phone, session_file, json_file, tdata_dir = item
+                key = phone or os.path.splitext(os.path.basename(str(session_file)))[0]
+                pdir = os.path.join(pending_dir, key)
+                os.makedirs(pdir, exist_ok=True)
+                if tdata_dir and os.path.exists(tdata_dir):
+                    shutil.copytree(tdata_dir, os.path.join(pdir, "tdata"), dirs_exist_ok=True)
+                if session_file and os.path.exists(session_file):
+                    shutil.copy2(session_file, os.path.join(pdir, os.path.basename(session_file)))
+                if json_file and os.path.exists(json_file):
+                    shutil.copy2(json_file, os.path.join(pdir, os.path.basename(json_file)))
+
+        def result_text_fn(cats, pending):
+            return f"""<tg-emoji emoji-id="5879937509579820068">🗑️</tg-emoji> <b>{tr('destroy.done', lang)}</b>
 
 <tg-emoji emoji-id="5931472654660800739">📊</tg-emoji> {tr('shaihuo.stats', lang)}:
 • <tg-emoji emoji-id="5879770735999717115">👤</tg-emoji> {tr('shaihuo.total', lang)}: <b>{len(accounts)}</b>
-• <tg-emoji emoji-id="5920052658743283381">✅</tg-emoji> {tr('destroy.success_destroy', lang)}: <b>{success_count}</b>
-• <tg-emoji emoji-id="5886496611835581345">❌</tg-emoji> {tr('2fa.failed', lang)}: <b>{failed_count}</b>"""
+• <tg-emoji emoji-id="5920052658743283381">✅</tg-emoji> {tr('destroy.success_destroy', lang)}: <b>{cats['success']}</b>
+• <tg-emoji emoji-id="5886496611835581345">❌</tg-emoji> {tr('2fa.failed', lang)}: <b>{cats['fail']}</b>
+• <tg-emoji emoji-id="5846008814129649022">⏸️</tg-emoji> {tr('shaihuo.pending', lang)}: <b>{pending}</b>"""
 
-        await context.bot.send_message(
-            chat_id=update.effective_chat.id,
-            text=result_text,
-            parse_mode='HTML'
+        await pack_and_send(
+            context, update, task,
+            categories={
+                "success": (success_dir, f"destroy_success_{datetime.now().strftime('%Y%m%d_%H%M%S')}.zip", lambda n: f"<b><tg-emoji emoji-id='5920052658743283381'>✅</tg-emoji> {tr('destroy.success_caption', lang)} ({n})</b>"),
+                "fail": (failed_dir, f"destroy_failed_{datetime.now().strftime('%Y%m%d_%H%M%S')}.zip", lambda n: f"<b><tg-emoji emoji-id='5886496611835581345'>❌</tg-emoji> {tr('2fa.failed', lang)} ({n})</b>"),
+            },
+            admins=admins, lang=lang, result_text_fn=result_text_fn, pending_dir=pending_dir
         )
-
-        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-        if success_count > 0:
-            with open(success_zip, 'rb') as f:
-                await context.bot.send_document(
-                    chat_id=update.effective_chat.id,
-                    document=f,
-                    filename=f"destroy_success_{timestamp}.zip",
-                    caption=f"<b><tg-emoji emoji-id='5920052658743283381'>✅</tg-emoji> {tr('destroy.success_caption', lang)} ({success_count})</b>",
-                    parse_mode='HTML'
-                )
-        if failed_count > 0:
-            with open(failed_zip, 'rb') as f:
-                await context.bot.send_document(
-                    chat_id=update.effective_chat.id,
-                    document=f,
-                    filename=f"destroy_failed_{timestamp}.zip",
-                    caption=f"<b><tg-emoji emoji-id='5886496611835581345'>❌</tg-emoji> {tr('2fa.failed', lang)} ({failed_count})</b>",
-                    parse_mode='HTML'
-                )
-
-        for admin_id in admins:
-            admin_id = admin_id.strip()
-            if not admin_id:
-                continue
-            try:
-                await context.bot.send_message(
-                    chat_id=admin_id,
-                    text=f"""<tg-emoji emoji-id="5771695636411847302">📢</tg-emoji> <b>{tr('destroy.task_done', lang)}</b>
-
-<tg-emoji emoji-id="5879770735999717115">👤</tg-emoji> {tr('admin.user', lang)}: <code>{user_id}</code>
-<tg-emoji emoji-id="5764747792371160364">📊</tg-emoji> {tr('shaihuo.total', lang)}: <b>{len(accounts)}</b>
-<tg-emoji emoji-id="5920052658743283381">✅</tg-emoji> {tr('shaihuo.success', lang)}: <b>{success_count}</b>
-<tg-emoji emoji-id="5886496611835581345">❌</tg-emoji> {tr('2fa.failed', lang)}: <b>{failed_count}</b>""",
-                    parse_mode='HTML'
-                )
-                admin_timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-                if success_count > 0:
-                    with open(success_zip, 'rb') as f:
-                        await context.bot.send_document(
-                            chat_id=admin_id,
-                            document=f,
-                            filename=f"destroy_success_{user_id}_{admin_timestamp}.zip",
-                            caption=f"<b><tg-emoji emoji-id='5920052658743283381'>✅</tg-emoji> {tr('shaihuo.success', lang)} ({success_count})</b>",
-                            parse_mode='HTML'
-                        )
-                if failed_count > 0:
-                    with open(failed_zip, 'rb') as f:
-                        await context.bot.send_document(
-                            chat_id=admin_id,
-                            document=f,
-                            filename=f"destroy_failed_{user_id}_{admin_timestamp}.zip",
-                            caption=f"<b><tg-emoji emoji-id='5886496611835581345'>❌</tg-emoji> {tr('2fa.failed', lang)} ({failed_count})</b>",
-                            parse_mode='HTML'
-                        )
-            except Exception as e:
-                logger.error(f"发送给管理员 {admin_id} 失败: {e}")
 
         try:
             await status_msg.delete()

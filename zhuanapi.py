@@ -21,6 +21,7 @@ logger = logging.getLogger(__name__)
 from i18n import tr, lang_from_update, get_env_i18n
 from dotenv import load_dotenv
 load_dotenv()
+from task_engine import BatchTask, run_batch, arm_timeout, request_stop
 
 CONVERT_API_BACK = os.getenv("CONVERT_API_BACK", "").replace('\\n', '\n')
 SERVER_IP = os.getenv("SERVER_IP")
@@ -483,11 +484,24 @@ async def process_conversion(update, context, zip_path, user_id, mode, manual_2f
         api_prefix = f"http://{SERVER_IP}:{API_PORT}"
         if DM:
             api_prefix = f"{DM}"
-        for i, (phone, session_path, json_path, tdata_dir) in enumerate(accounts, 1):
+        api_lock = asyncio.Lock()
+
+        async def on_progress(task):
+            try:
+                await progress_msg.edit_text(
+                    f"<tg-emoji emoji-id='5839200986022812209'>🔄</tg-emoji> {tr('api.processing_count', lang)}: {task.completed}/{len(accounts)}",
+                    parse_mode='HTML'
+                )
+            except:
+                pass
+
+        async def process_one(item, task):
+            phone, session_path, json_path, tdata_dir = item
             new_id = generate_id()
-            while new_id in used_ids:
-                new_id = generate_id()
-            used_ids.add(new_id)
+            async with api_lock:
+                while new_id in used_ids:
+                    new_id = generate_id()
+                used_ids.add(new_id)
             new_session = os.path.join("acd", f"{new_id}.session")
             shutil.copy2(session_path, new_session)
             json_config = {}
@@ -540,30 +554,33 @@ async def process_conversion(update, context, zip_path, user_id, mode, manual_2f
                                 two_fa = sanitize_2fa(str(two_fa))
                     except Exception as e:
                         logger.debug(f"读取JSON失败 {json_path}: {e}")
-            api_data[new_id] = {
-                "phone": phone_number,
-                "two_fa": two_fa if two_fa else "",
-                "app_id": _app_id,
-                "app_hash": _app_hash,
-                "device_model": device_model,
-                "app_version": app_version,
-                "system_lang_code": system_lang_code,
-                "system_vision": system_vision,
-                "lang_pack": lang_pack
-            }
-            line = f"{phone_number} --- {api_prefix}/getcode?id={new_id}"
-            if two_fa:
-                line += f" (2FA: {two_fa})"
-            lines.append(line)
-            if i % 5 == 0 or i == len(accounts):
-                try:
-                    await progress_msg.edit_text(
-                        f"<tg-emoji emoji-id='5839200986022812209'>🔄</tg-emoji> {tr('api.processing_count', lang)}: {i}/{len(accounts)}",
-                        parse_mode='HTML'
-                    )
-                except:
-                    pass
-            await asyncio.sleep(0.3)
+            async with api_lock:
+                api_data[new_id] = {
+                    "phone": phone_number,
+                    "two_fa": two_fa if two_fa else "",
+                    "app_id": _app_id,
+                    "app_hash": _app_hash,
+                    "device_model": device_model,
+                    "app_version": app_version,
+                    "system_lang_code": system_lang_code,
+                    "system_vision": system_vision,
+                    "lang_pack": lang_pack
+                }
+                line = f"{phone_number} --- {api_prefix}/getcode?id={new_id}"
+                if two_fa:
+                    line += f" (2FA: {two_fa})"
+                lines.append(line)
+
+        task = BatchTask(user_id, update.effective_chat.id, accounts, module_name="zhuanapi")
+        wd = arm_timeout(task, int(os.getenv("TASK_TIMEOUT", "1800")))
+        await run_batch(update, context, task, process_one, on_progress=on_progress)
+        wd.cancel()
+        remaining = task.remaining_pending()
+        for item in remaining:
+            try:
+                shutil.copy2(item[1], os.path.join("acd", f"pending_{os.path.basename(item[1])}"))
+            except:
+                pass
         json_path = os.path.join("acd", "api.json")
         existing_data = {}
         if os.path.exists(json_path):
@@ -579,11 +596,12 @@ async def process_conversion(update, context, zip_path, user_id, mode, manual_2f
         with open(txt_path, 'w', encoding='utf-8') as f:
             f.write("\n".join(lines))
         await progress_msg.delete()
+        stop_tag = " (已终止)" if (task.stopped or remaining) else ""
         await context.bot.send_message(
             chat_id=update.effective_chat.id,
             text=f"""<tg-emoji emoji-id="5909201569898827582">✅</tg-emoji> <b>{tr('api.done', lang)}</b>
 
-<tg-emoji emoji-id="5931472654660800739">📊</tg-emoji> {tr('api.total', lang)}: <b>{len(accounts)}</b>""",
+<tg-emoji emoji-id="5931472654660800739">📊</tg-emoji> {tr('api.total', lang)}: <b>{len(api_data)}</b>{stop_tag}""",
             parse_mode='HTML'
         )
         with open(txt_path, 'rb') as f:

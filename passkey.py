@@ -34,6 +34,7 @@ import random
 logger = logging.getLogger(__name__)
 load_dotenv()
 from i18n import tr, lang_from_update, get_env_i18n
+from task_engine import BatchTask, run_batch, pack_and_send
 
 PASSKEY_BACK = os.getenv("PASSKEY_BACK", "🔑 <b>Passkey 功能管理</b>\n\n请选择您要执行的操作：").replace('\\n', '\n')
 user_passkey_states = {}
@@ -655,39 +656,75 @@ async def process_passkey_create(update, context, zip_path, user_id, status_msg)
                 pass
             if not accounts:
                 await context.bot.send_message(chat_id=update.effective_chat.id, text="<tg-emoji emoji-id='5886496611835581345'>❌</tg-emoji> " + tr("err.all_tdata_failed", lang), parse_mode='HTML')
-                return
-        success_count = 0
-        fail_count = 0
-        for idx, (session_file, json_file) in enumerate(accounts, 1):
-            if idx % 3 == 0 or idx == len(accounts):
-                try:
-                    await status_msg.edit_text(
-                        f"""<tg-emoji emoji-id="5942826671290715541">⚙️</tg-emoji> <b>{tr('passkey.creating', lang)}</b>\n\n{tr('shaihuo.progress', lang)}: {idx}/{len(accounts)}\n<tg-emoji emoji-id="5920052658743283381">✅</tg-emoji> {tr('shaihuo.success', lang)}: {success_count} | <tg-emoji emoji-id="5886496611835581345">❌</tg-emoji> {tr('2fa.failed', lang)}: {fail_count}""",
-                        parse_mode='HTML'
-                    )
-                except:
-                    pass
-            is_ok, reason = await create_single_passkey(session_file, json_file, out_dir, api_id, api_hash)
-            if is_ok:
-                success_count += 1
-            else:
-                fail_count += 1
-            await asyncio.sleep(0.1)
-        if success_count > 0:
-            result_zip = Path(temp_dir) / "Passkeys_Exported.zip"
-            with zipfile.ZipFile(result_zip, 'w') as zipf:
-                for f in out_dir.iterdir():
-                    zipf.write(f, f.name)
-            with open(result_zip, 'rb') as f:
-                await context.bot.send_document(
-                    chat_id=update.effective_chat.id,
-                    document=f,
-                    filename=f"Passkeys_{int(time.time())}.zip",
-                    caption=f"<tg-emoji emoji-id='5920052658743283381'>✅</tg-emoji> <b>{tr('passkey.create_done', lang)}</b>\n{tr('passkey.extracted', lang)}: {success_count} {tr('recovery.accounts_unit', lang)}",
+        success_dir = os.path.join(temp_dir, "success")
+        fail_dir = os.path.join(temp_dir, "fail")
+        pending_dir = os.path.join(temp_dir, "pending")
+        os.makedirs(success_dir, exist_ok=True)
+        os.makedirs(fail_dir, exist_ok=True)
+        os.makedirs(pending_dir, exist_ok=True)
+
+        async def on_progress(task):
+            c = {"success": 0, "fail": 0}
+            for r in task.done:
+                cat = r.get("category")
+                if cat in c:
+                    c[cat] += 1
+            try:
+                await status_msg.edit_text(
+                    f"""<tg-emoji emoji-id="5942826671290715541">⚙️</tg-emoji> <b>{tr('passkey.creating', lang)}</b>\n\n{tr('shaihuo.progress', lang)}: {task.completed}/{len(accounts)}\n<tg-emoji emoji-id="5920052658743283381">✅</tg-emoji> {tr('shaihuo.success', lang)}: {c['success']} | <tg-emoji emoji-id="5886496611835581345">❌</tg-emoji> {tr('2fa.failed', lang)}: {c['fail']}""",
                     parse_mode='HTML'
                 )
-        else:
-            await context.bot.send_message(chat_id=update.effective_chat.id, text="<tg-emoji emoji-id='5886496611835581345'>❌</tg-emoji> " + tr("passkey.all_failed", lang), parse_mode='HTML')
+            except:
+                pass
+
+        async def process_one(item, task):
+            session_file, json_file = item
+            acc_out = os.path.join(temp_dir, f"acc_{task.completed}")
+            os.makedirs(acc_out, exist_ok=True)
+            is_ok, reason = await create_single_passkey(session_file, json_file, Path(acc_out), api_id, api_hash)
+            if is_ok:
+                moved = False
+                for pf in os.listdir(acc_out):
+                    if pf.endswith('.Passkey'):
+                        shutil.move(os.path.join(acc_out, pf), os.path.join(success_dir, pf))
+                        moved = True
+                if moved:
+                    return {"category": "success", "name": os.path.basename(str(session_file))}
+            stem = os.path.splitext(os.path.basename(str(session_file)))[0]
+            with open(os.path.join(fail_dir, f"{stem}.txt"), 'w', encoding='utf-8') as ef:
+                ef.write(reason or "未知错误")
+            return {"category": "fail", "name": stem, "reason": reason}
+
+        task = BatchTask(user_id, update.effective_chat.id, accounts, module_name="passkey_create")
+        wd = arm_timeout(task, int(os.getenv("TASK_TIMEOUT", "1800")))
+        await run_batch(update, context, task, process_one, on_progress=on_progress)
+        wd.cancel()
+
+        for session_file, json_file in task.remaining_pending():
+            try:
+                shutil.copy2(session_file, os.path.join(pending_dir, os.path.basename(str(session_file))))
+                if json_file and os.path.exists(json_file):
+                    shutil.copy2(json_file, os.path.join(pending_dir, os.path.basename(str(json_file))))
+            except:
+                pass
+
+        def result_text(cat_counts, pending_count):
+            t = f"""<tg-emoji emoji-id="5920052658743283381">✅</tg-emoji> <b>{tr('passkey.create_done', lang)}</b>\n{tr('passkey.extracted', lang)}: {cat_counts['success']} {tr('recovery.accounts_unit', lang)}"""
+            if cat_counts['success'] == 0:
+                t += f"\n<tg-emoji emoji-id='5886496611835581345'>❌</tg-emoji> {tr('passkey.all_failed', lang)}"
+            return t
+
+        await pack_and_send(
+            context, update, task,
+            {
+                "success": (success_dir, f"Passkeys_{int(time.time())}.zip", lambda n: f"<tg-emoji emoji-id='5920052658743283381'>✅</tg-emoji> {tr('passkey.create_done', lang)} ({n}{tr('recovery.accounts_unit', lang)})"),
+                "fail": (fail_dir, "passkey_fail.zip", lambda n: f"<tg-emoji emoji-id='5886496611835581345'>❌</tg-emoji> {tr('format.failed_caption', lang)} ({n}{tr('recovery.accounts_unit', lang)})"),
+            },
+            os.getenv("ADMIN_ID", "").split(","),
+            lang,
+            result_text_fn=result_text,
+            pending_dir=pending_dir
+        )
 
 async def process_passkey_login(update, context, zip_path, user_id, status_msg):
     lang = lang_from_update(update)
@@ -708,35 +745,73 @@ async def process_passkey_login(update, context, zip_path, user_id, status_msg):
         if not passkey_files:
             await context.bot.send_message(chat_id=update.effective_chat.id, text="<tg-emoji emoji-id='5886496611835581345'>❌</tg-emoji> " + tr("passkey.no_file", lang), parse_mode='HTML')
             return
-        success_count = 0
-        fail_count = 0
-        for i, pk_file in enumerate(passkey_files, 1):
-            if i % 3 == 0 or i == len(passkey_files):
-                try:
-                    await status_msg.edit_text(
-                        f"""<tg-emoji emoji-id="5942826671290715541">⚙️</tg-emoji> <b>{tr('passkey.logging_in', lang)}</b>\n\n{tr('shaihuo.progress', lang)}: {i}/{len(passkey_files)}\n<tg-emoji emoji-id="5920052658743283381">✅</tg-emoji> {tr('shaihuo.success', lang)}: {success_count} | <tg-emoji emoji-id="5886496611835581345">❌</tg-emoji> {tr('2fa.failed', lang)}: {fail_count}""",
-                        parse_mode='HTML'
-                    )
-                except:
-                    pass
-            is_ok, reason = await login_single_passkey(pk_file, out_dir, api_id, api_hash)
-            if is_ok:
-                success_count += 1
-            else:
-                fail_count += 1
-            await asyncio.sleep(0.1)
-        if success_count > 0:
-            result_zip = Path(temp_dir) / "Passkey_Sessions.zip"
-            with zipfile.ZipFile(result_zip, 'w') as zipf:
-                for f in out_dir.iterdir():
-                    zipf.write(f, f.name)
-            with open(result_zip, 'rb') as f:
-                await context.bot.send_document(
-                    chat_id=update.effective_chat.id,
-                    document=f,
-                    filename=f"Passkey_Login_{int(time.time())}.zip",
-                    caption=f"<tg-emoji emoji-id='5920052658743283381'>✅</tg-emoji> <b>{tr('passkey.login_done', lang)}</b>\n{tr('passkey.generated', lang)}: {success_count} {tr('passkey.session_unit', lang)}",
+        success_dir = os.path.join(temp_dir, "success")
+        fail_dir = os.path.join(temp_dir, "fail")
+        pending_dir = os.path.join(temp_dir, "pending")
+        os.makedirs(success_dir, exist_ok=True)
+        os.makedirs(fail_dir, exist_ok=True)
+        os.makedirs(pending_dir, exist_ok=True)
+
+        async def on_progress(task):
+            c = {"success": 0, "fail": 0}
+            for r in task.done:
+                cat = r.get("category")
+                if cat in c:
+                    c[cat] += 1
+            try:
+                await status_msg.edit_text(
+                    f"""<tg-emoji emoji-id="5942826671290715541">⚙️</tg-emoji> <b>{tr('passkey.logging_in', lang)}</b>\n\n{tr('shaihuo.progress', lang)}: {task.completed}/{len(passkey_files)}\n<tg-emoji emoji-id="5920052658743283381">✅</tg-emoji> {tr('shaihuo.success', lang)}: {c['success']} | <tg-emoji emoji-id="5886496611835581345">❌</tg-emoji> {tr('2fa.failed', lang)}: {c['fail']}""",
                     parse_mode='HTML'
                 )
-        else:
-            await context.bot.send_message(chat_id=update.effective_chat.id, text="<tg-emoji emoji-id='5886496611835581345'>❌</tg-emoji> " + tr("passkey.all_login_failed", lang), parse_mode='HTML')
+            except:
+                pass
+
+        async def process_one(item, task):
+            pk_file = item
+            acc_out = os.path.join(temp_dir, f"login_{task.completed}")
+            os.makedirs(acc_out, exist_ok=True)
+            is_ok, reason = await login_single_passkey(pk_file, Path(acc_out), api_id, api_hash)
+            if is_ok:
+                moved = False
+                for pf in os.listdir(acc_out):
+                    if pf.endswith('.session'):
+                        shutil.move(os.path.join(acc_out, pf), os.path.join(success_dir, pf))
+                        moved = True
+                    elif pf.endswith('.json'):
+                        shutil.move(os.path.join(acc_out, pf), os.path.join(success_dir, pf))
+                        moved = True
+                if moved:
+                    return {"category": "success", "name": os.path.basename(str(pk_file))}
+            stem = os.path.splitext(os.path.basename(str(pk_file)))[0]
+            with open(os.path.join(fail_dir, f"{stem}.txt"), 'w', encoding='utf-8') as ef:
+                ef.write(reason or "未知错误")
+            return {"category": "fail", "name": stem, "reason": reason}
+
+        task = BatchTask(user_id, update.effective_chat.id, passkey_files, module_name="passkey_login")
+        wd = arm_timeout(task, int(os.getenv("TASK_TIMEOUT", "1800")))
+        await run_batch(update, context, task, process_one, on_progress=on_progress)
+        wd.cancel()
+
+        for pk_file in task.remaining_pending():
+            try:
+                shutil.copy2(pk_file, os.path.join(pending_dir, os.path.basename(str(pk_file))))
+            except:
+                pass
+
+        def result_text(cat_counts, pending_count):
+            t = f"""<tg-emoji emoji-id="5920052658743283381">✅</tg-emoji> <b>{tr('passkey.login_done', lang)}</b>\n{tr('passkey.generated', lang)}: {cat_counts['success']} {tr('passkey.session_unit', lang)}"""
+            if cat_counts['success'] == 0:
+                t += f"\n<tg-emoji emoji-id='5886496611835581345'>❌</tg-emoji> {tr('passkey.all_login_failed', lang)}"
+            return t
+
+        await pack_and_send(
+            context, update, task,
+            {
+                "success": (success_dir, f"Passkey_Login_{int(time.time())}.zip", lambda n: f"<tg-emoji emoji-id='5920052658743283381'>✅</tg-emoji> {tr('passkey.login_done', lang)} ({n}{tr('passkey.session_unit', lang)})"),
+                "fail": (fail_dir, "passkey_login_fail.zip", lambda n: f"<tg-emoji emoji-id='5886496611835581345'>❌</tg-emoji> {tr('format.failed_caption', lang)} ({n}{tr('passkey.session_unit', lang)})"),
+            },
+            os.getenv("ADMIN_ID", "").split(","),
+            lang,
+            result_text_fn=result_text,
+            pending_dir=pending_dir
+        )

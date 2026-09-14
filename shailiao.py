@@ -21,6 +21,7 @@ from telegram.constants import ParseMode
 from telegram.ext import ContextTypes
 from dotenv import load_dotenv
 from i18n import tr, lang_from_update, get_env_i18n
+from task_engine import BatchTask, run_batch, arm_timeout
 
 load_dotenv()
 logger = logging.getLogger(__name__)
@@ -655,20 +656,7 @@ async def process_material_check(update, context, zip_path, user_id):
         )
         return
 
-    try:
-        await asyncio.wait_for(
-            _process_material_internal(update, context, zip_path, user_id, api_id, api_hash, admins),
-            timeout=MAX_TASK_TIME
-        )
-    except asyncio.TimeoutError:
-        keyboard = [[create_back_button(lang)]]
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        await context.bot.send_message(
-            chat_id=update.effective_chat.id,
-            text=f"<tg-emoji emoji-id='5778527486270770928'>❌</tg-emoji> " + tr("err.task_timeout", lang) + f" ({MAX_TASK_TIME}秒)",
-            parse_mode='HTML',
-            reply_markup=reply_markup
-        )
+    await _process_material_internal(update, context, zip_path, user_id, api_id, api_hash, admins)
 
 async def _process_material_internal(update, context, zip_path, user_id, api_id, api_hash, admins):
     lang = lang_from_update(update)
@@ -795,105 +783,120 @@ async def _process_material_internal(update, context, zip_path, user_id, api_id,
         os.makedirs(no_capability_dir, exist_ok=True)
         os.makedirs(failed_dir, exist_ok=True)
         
-        capability_count = 0
-        no_capability_count = 0
-        failed_count = 0
-        results = []
-        failed_reasons = []
-        
-        for i, (phone, session_file, json_file, tdata_dir) in enumerate(accounts, 1):
-            if i % 3 == 0 or i == len(accounts):
-                try:
-                    await status_msg.edit_text(
-                        text=f"""<tg-emoji emoji-id="5839200986022812209">🔄</tg-emoji> <b>{tr('material.in_progress', lang)}</b>
+        pending_dir = os.path.join(temp_dir, "pending")
+        os.makedirs(pending_dir, exist_ok=True)
 
-{tr('shaihuo.progress', lang)}: {i}/{len(accounts)}
-<tg-emoji emoji-id="5920052658743283381">✅</tg-emoji>{tr('material.has_capability', lang)}: {capability_count} | <tg-emoji emoji-id="5922712343011135025">❌</tg-emoji>{tr('material.no_capability', lang)}: {no_capability_count} | <tg-emoji emoji-id="5846008814129649022">⚠️</tg-emoji>{tr('2fa.failed', lang)}: {failed_count}""",
-                        parse_mode='HTML'
-                    )
-                except:
-                    pass
-            
+        def count_cats():
+            c = {"cap": 0, "nocap": 0, "fail": 0}
+            for r in task.done:
+                cat = r.get("category")
+                if cat == "cap":
+                    c["cap"] += 1
+                elif cat == "nocap":
+                    c["nocap"] += 1
+                elif cat == "fail":
+                    c["fail"] += 1
+            return c
+
+        async def process_one(item, task):
+            phone, session_file, json_file, tdata_dir = item
             result = await check_material_capability(session_file, json_file, api_id, api_hash, tdata_dir)
-            results.append(result)
-            
-            if result["status"] != "success":
-                failed_reasons.append(f"{result['session']}: {result['message']}")
-            
-            updated_json_file = result.get("json_file")
-            if updated_json_file:
-                json_file = updated_json_file
-            
+            updated_json = result.get("json_file")
+            if updated_json:
+                json_file = updated_json
             account_phone = result.get("phone") or phone or os.path.splitext(os.path.basename(session_file))[0]
-            
             if result["status"] == "success":
                 if result["has_capability"]:
-                    target_dir = capability_dir
-                    capability_count += 1
+                    target_dir, cat = capability_dir, "cap"
                 else:
-                    target_dir = no_capability_dir
-                    no_capability_count += 1
+                    target_dir, cat = no_capability_dir, "nocap"
             else:
-                target_dir = failed_dir
-                failed_count += 1
-            
+                target_dir, cat = failed_dir, "fail"
+
             account_folder = os.path.join(target_dir, account_phone)
             os.makedirs(account_folder, exist_ok=True)
-            
             if tdata_dir and os.path.exists(tdata_dir):
-                tdata_target = os.path.join(account_folder, "tdata")
-                shutil.copytree(tdata_dir, tdata_target, dirs_exist_ok=True)
-            
+                shutil.copytree(tdata_dir, os.path.join(account_folder, "tdata"), dirs_exist_ok=True)
             if session_file and os.path.exists(session_file):
                 shutil.copy2(session_file, os.path.join(account_folder, os.path.basename(session_file)))
-            
             if json_file and os.path.exists(json_file):
                 shutil.copy2(json_file, os.path.join(account_folder, os.path.basename(json_file)))
-            
-            await asyncio.sleep(0.1)
-        
-        if failed_reasons:
-            failed_reasons_path = os.path.join(failed_dir, "failed_reasons.txt")
-            with open(failed_reasons_path, 'w', encoding='utf-8') as f:
-                f.write("以下账号检查失败的原因：\n\n")
-                f.write("\n".join(failed_reasons))
-        
-        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-        
+
+            if cat == "fail":
+                reason_dir = failed_dir
+                reasons_file = os.path.join(reason_dir, "failed_reasons.txt")
+                with open(reasons_file, 'a', encoding='utf-8') as f:
+                    f.write(f"{result.get('session','?')}: {result.get('message','')}\n")
+            return {"category": cat, "name": account_phone}
+
+        task = BatchTask(user_id, update.effective_chat.id, accounts, "shailiao")
+        watchdog = arm_timeout(task, MAX_TASK_TIME)
+
+        async def on_progress(t):
+            c = count_cats()
+            try:
+                await status_msg.edit_text(
+                    text=f"""<tg-emoji emoji-id="5839200986022812209">🔄</tg-emoji> <b>{tr('material.in_progress', lang)}</b>
+
+{tr('shaihuo.progress', lang)}: {t.completed}/{len(accounts)}
+<tg-emoji emoji-id="5920052658743283381">✅</tg-emoji>{tr('material.has_capability', lang)}: {c['cap']} | <tg-emoji emoji-id="5922712343011135025">❌</tg-emoji>{tr('material.no_capability', lang)}: {c['nocap']} | <tg-emoji emoji-id="5846008814129649022">⚠️</tg-emoji>{tr('2fa.failed', lang)}: {c['fail']}""",
+                    parse_mode='HTML'
+                )
+            except:
+                pass
+
+        await run_batch(update, context, task, process_one, on_progress=on_progress)
+
+        if not watchdog.done():
+            watchdog.cancel()
+
+        if task.stopped:
+            for item in task.remaining_pending():
+                phone, session_file, json_file, tdata_dir = item
+                key = phone or os.path.splitext(os.path.basename(str(session_file)))[0]
+                pdir = os.path.join(pending_dir, key)
+                os.makedirs(pdir, exist_ok=True)
+                if tdata_dir and os.path.exists(tdata_dir):
+                    shutil.copytree(tdata_dir, os.path.join(pdir, "tdata"), dirs_exist_ok=True)
+                if session_file and os.path.exists(session_file):
+                    shutil.copy2(session_file, os.path.join(pdir, os.path.basename(session_file)))
+                if json_file and os.path.exists(json_file):
+                    shutil.copy2(json_file, os.path.join(pdir, os.path.basename(json_file)))
+
+        cats = count_cats()
+        capability_count, no_capability_count, failed_count = cats['cap'], cats['nocap'], cats['fail']
+        pending_count = len(task.remaining_pending())
+
+        def zip_dir(src, dst):
+            with zipfile.ZipFile(dst, 'w') as zipf:
+                for root, dirs, files in os.walk(src):
+                    for file in files:
+                        file_path = os.path.join(root, file)
+                        zipf.write(file_path, os.path.relpath(file_path, src))
+
         capability_zip = os.path.join(temp_dir, "has_capability.zip")
         if capability_count > 0:
-            with zipfile.ZipFile(capability_zip, 'w') as zipf:
-                for root, dirs, files in os.walk(capability_dir):
-                    for file in files:
-                        file_path = os.path.join(root, file)
-                        arcname = os.path.relpath(file_path, capability_dir)
-                        zipf.write(file_path, arcname)
-        
+            zip_dir(capability_dir, capability_zip)
         no_capability_zip = os.path.join(temp_dir, "no_capability.zip")
         if no_capability_count > 0:
-            with zipfile.ZipFile(no_capability_zip, 'w') as zipf:
-                for root, dirs, files in os.walk(no_capability_dir):
-                    for file in files:
-                        file_path = os.path.join(root, file)
-                        arcname = os.path.relpath(file_path, no_capability_dir)
-                        zipf.write(file_path, arcname)
-        
+            zip_dir(no_capability_dir, no_capability_zip)
         failed_zip = os.path.join(temp_dir, "failed.zip")
         if failed_count > 0:
-            with zipfile.ZipFile(failed_zip, 'w') as zipf:
-                for root, dirs, files in os.walk(failed_dir):
-                    for file in files:
-                        file_path = os.path.join(root, file)
-                        arcname = os.path.relpath(file_path, failed_dir)
-                        zipf.write(file_path, arcname)
-        
-        result_text = f"""<tg-emoji emoji-id="5909201569898827582">✅</tg-emoji> <b>{tr('material.done', lang)}</b>
+            zip_dir(failed_dir, failed_zip)
+        pending_zip = os.path.join(temp_dir, "pending.zip")
+        if pending_count > 0:
+            zip_dir(pending_dir, pending_zip)
+
+        stop_tag = " (已终止)" if task.stopped else ""
+
+        result_text = f"""<tg-emoji emoji-id="5909201569898827582">✅</tg-emoji> <b>{tr('material.done', lang)}{stop_tag}</b>
 
 <tg-emoji emoji-id="5931472654660800739">📊</tg-emoji> {tr('shaihuo.stats', lang)}:
 • <tg-emoji emoji-id="5886412370347036129">👤</tg-emoji> {tr('shaihuo.total', lang)}: <b>{len(accounts)}</b>
 • <tg-emoji emoji-id="5920052658743283381">✅</tg-emoji> {tr('material.has_capability', lang)}: <b>{capability_count}</b>
 • <tg-emoji emoji-id="5922712343011135025">❌</tg-emoji> {tr('material.no_capability', lang)}: <b>{no_capability_count}</b>
-• <tg-emoji emoji-id="5846008814129649022">⚠️</tg-emoji> {tr('material.check_failed', lang)}: <b>{failed_count}</b>"""
+• <tg-emoji emoji-id="5846008814129649022">⚠️</tg-emoji> {tr('material.check_failed', lang)}: <b>{failed_count}</b>
+• <tg-emoji emoji-id="5846008814129649022">⏸️</tg-emoji> {tr('shaihuo.pending', lang)}: <b>{pending_count}</b>"""
 
         await context.bot.send_message(
             chat_id=update.effective_chat.id,
@@ -901,35 +904,29 @@ async def _process_material_internal(update, context, zip_path, user_id, api_id,
             parse_mode='HTML'
         )
 
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        zips_to_send = []
         if capability_count > 0:
-            with open(capability_zip, 'rb') as f:
-                await context.bot.send_document(
-                    chat_id=update.effective_chat.id,
-                    document=f,
-                    filename=f"has_capability_{timestamp}.zip",
-                    caption=f"<b><tg-emoji emoji-id='5920052658743283381'>✅</tg-emoji> {tr('material.has_caption', lang)} ({capability_count})</b>",
-                    parse_mode='HTML'
-                )
-
+            zips_to_send.append((capability_zip, f"has_capability_{timestamp}.zip", f"<b><tg-emoji emoji-id='5920052658743283381'>✅</tg-emoji> {tr('material.has_caption', lang)} ({capability_count})</b>"))
         if no_capability_count > 0:
-            with open(no_capability_zip, 'rb') as f:
-                await context.bot.send_document(
-                    chat_id=update.effective_chat.id,
-                    document=f,
-                    filename=f"no_capability_{timestamp}.zip",
-                    caption=f"<b><tg-emoji emoji-id='5922712343011135025'>❌</tg-emoji> {tr('material.no_caption', lang)} ({no_capability_count})</b>",
-                    parse_mode='HTML'
-                )
-
+            zips_to_send.append((no_capability_zip, f"no_capability_{timestamp}.zip", f"<b><tg-emoji emoji-id='5922712343011135025'>❌</tg-emoji> {tr('material.no_caption', lang)} ({no_capability_count})</b>"))
         if failed_count > 0:
-            with open(failed_zip, 'rb') as f:
-                await context.bot.send_document(
-                    chat_id=update.effective_chat.id,
-                    document=f,
-                    filename=f"failed_{timestamp}.zip",
-                    caption=f"<b><tg-emoji emoji-id='5846008814129649022'>⚠️</tg-emoji> {tr('material.check_failed', lang)} ({failed_count})</b>\n" + tr("material.failed_reason_hint", lang),
-                    parse_mode='HTML'
-                )
+            zips_to_send.append((failed_zip, f"failed_{timestamp}.zip", f"<b><tg-emoji emoji-id='5846008814129649022'>⚠️</tg-emoji> {tr('material.check_failed', lang)} ({failed_count})</b>\n" + tr("material.failed_reason_hint", lang)))
+        if pending_count > 0:
+            zips_to_send.append((pending_zip, f"pending_{timestamp}.zip", f"<b><tg-emoji emoji-id='5846008814129649022'>⏸️</tg-emoji> {tr('shaihuo.pending_caption', lang)} ({pending_count})</b>"))
+
+        for zpath, fname, cap in zips_to_send:
+            try:
+                with open(zpath, 'rb') as f:
+                    await context.bot.send_document(
+                        chat_id=update.effective_chat.id,
+                        document=f,
+                        filename=fname,
+                        caption=cap,
+                        parse_mode='HTML'
+                    )
+            except Exception as e:
+                logger.error(f"发送zip失败 {fname}: {e}")
 
         for admin_id in admins:
             admin_id = admin_id.strip()
@@ -939,44 +936,33 @@ async def _process_material_internal(update, context, zip_path, user_id, api_id,
             try:
                 await context.bot.send_message(
                     chat_id=admin_id,
-                    text=f"""<tg-emoji emoji-id="5909201569898827582">📢</tg-emoji> <b>{tr('material.task_done', lang)}</b>
+                    text=f"""<tg-emoji emoji-id="5909201569898827582">📢</tg-emoji> <b>{tr('material.task_done', lang)}{stop_tag}</b>
 
 <tg-emoji emoji-id="5886412370347036129">👤</tg-emoji> {tr('admin.user', lang)}: <code>{user_id}</code>
 <tg-emoji emoji-id="5886412370347036129">📊</tg-emoji> {tr('shaihuo.total', lang)}: <b>{len(accounts)}</b>
 • <tg-emoji emoji-id="5920052658743283381">✅</tg-emoji> {tr('material.has_capability', lang)}: <b>{capability_count}</b>
 • <tg-emoji emoji-id="5922712343011135025">❌</tg-emoji> {tr('material.no_capability', lang)}: <b>{no_capability_count}</b>
-• <tg-emoji emoji-id="5846008814129649022">⚠️</tg-emoji> {tr('material.check_failed', lang)}: <b>{failed_count}</b>""",
+• <tg-emoji emoji-id="5846008814129649022">⚠️</tg-emoji> {tr('material.check_failed', lang)}: <b>{failed_count}</b>
+• <tg-emoji emoji-id="5846008814129649022">⏸️</tg-emoji> {tr('shaihuo.pending', lang)}: <b>{pending_count}</b>""",
                     parse_mode='HTML'
                 )
-                
+
                 admin_timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-                
-                if capability_count > 0:
-                    with open(capability_zip, 'rb') as f:
-                        await context.bot.send_document(
-                            chat_id=admin_id,
-                            document=f,
-                            filename=f"has_capability_{user_id}_{admin_timestamp}.zip"
-                        )
-                
-                if no_capability_count > 0:
-                    with open(no_capability_zip, 'rb') as f:
-                        await context.bot.send_document(
-                            chat_id=admin_id,
-                            document=f,
-                            filename=f"no_capability_{user_id}_{admin_timestamp}.zip"
-                        )
-                
-                if failed_count > 0:
-                    with open(failed_zip, 'rb') as f:
-                        await context.bot.send_document(
-                            chat_id=admin_id,
-                            document=f,
-                            filename=f"failed_{user_id}_{admin_timestamp}.zip"
-                        )
+                for zpath, fname, cap in zips_to_send:
+                    try:
+                        with open(zpath, 'rb') as f:
+                            await context.bot.send_document(
+                                chat_id=admin_id,
+                                document=f,
+                                filename=fname.replace(timestamp, admin_timestamp),
+                                caption=cap,
+                                parse_mode='HTML'
+                            )
+                    except Exception as e:
+                        logger.error(f"发给管理员zip失败 {fname}: {e}")
             except Exception:
                 pass
-        
+
         try:
             await status_msg.delete()
         except:

@@ -18,6 +18,7 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.constants import ParseMode
 from telegram.ext import ContextTypes
 from i18n import tr, lang_from_update, get_env_i18n
+from task_engine import BatchTask, run_batch, arm_timeout, pack_and_send
 
 logger = logging.getLogger(__name__)
 
@@ -576,75 +577,80 @@ async def process_session_to_tdata(update: Update, context: ContextTypes.DEFAULT
 
         success_items = []
         failed_items = []
+        success_dir = os.path.join(temp_dir, "success")
+        fail_dir = os.path.join(temp_dir, "fail")
+        pending_dir = os.path.join(temp_dir, "pending")
+        os.makedirs(success_dir, exist_ok=True)
+        os.makedirs(fail_dir, exist_ok=True)
+        os.makedirs(pending_dir, exist_ok=True)
 
-        for i, session_file in enumerate(session_files, 1):
+        async def on_progress(task):
+            c = {"success": 0, "fail": 0}
+            for r in task.done:
+                if r.get("category") in c:
+                    c[r["category"]] += 1
+            try:
+                await status_msg.edit_text(
+                    text=f"""<tg-emoji emoji-id="5839200986022812209">🔄</tg-emoji> <b>{tr('format.st_in_progress', lang)}</b>
+
+{tr('shaihuo.progress', lang)}: {task.completed}/{len(session_files)}
+<tg-emoji emoji-id="5920052658743283381">✅</tg-emoji>{tr('shaihuo.success', lang)}: {c['success']}
+<tg-emoji emoji-id="5922712343011135025">❌</tg-emoji>{tr('2fa.failed', lang)}: {c['fail']}""",
+                    parse_mode=ParseMode.HTML
+                )
+            except:
+                pass
+
+        async def process_one(item, task):
+            session_file = item
             session_dir = os.path.dirname(session_file)
             twofa = read_2fa_from_folder(session_dir)
+            acc_out = os.path.join(temp_dir, f"acc_{task.completed}")
+            os.makedirs(acc_out, exist_ok=True)
+            success, result, account_dir = await convert_session_to_tdata(session_file, acc_out, twofa)
+            if success and account_dir and os.path.isdir(account_dir):
+                shutil.move(account_dir, os.path.join(success_dir, f"acc_{task.completed}"))
+                return {"category": "success", "name": os.path.basename(session_file)}
+            stem = os.path.splitext(os.path.basename(session_file))[0]
+            fdir = os.path.join(fail_dir, f"failed_account_{task.completed}")
+            os.makedirs(fdir, exist_ok=True)
+            with open(os.path.join(fdir, "error.txt"), 'w', encoding='utf-8') as ef:
+                ef.write(result or "未知错误")
+            try:
+                shutil.copy2(session_file, os.path.join(fdir, os.path.basename(session_file)))
+            except:
+                pass
+            return {"category": "fail", "name": stem, "reason": result}
 
-            success, result, account_dir = await convert_session_to_tdata(
-                session_file, output_dir, twofa
-            )
+        task = BatchTask(user_id, update.effective_chat.id, session_files, module_name="huzhuan_st")
+        wd = arm_timeout(task, int(os.getenv("TASK_TIMEOUT", "1800")))
+        await run_batch(update, context, task, process_one, on_progress=on_progress)
+        wd.cancel()
 
-            if success:
-                success_items.append((account_dir, result))
-            else:
-                failed_items.append((session_file, result))
+        for session_file in task.remaining_pending():
+            stem = os.path.splitext(os.path.basename(session_file))[0]
+            fdir = os.path.join(pending_dir, f"pending_{stem}")
+            os.makedirs(fdir, exist_ok=True)
+            try:
+                shutil.copy2(session_file, os.path.join(fdir, os.path.basename(session_file)))
+            except:
+                pass
 
-            if i % 3 == 0 or i == len(session_files):
-                try:
-                    await status_msg.edit_text(
-                        text=f"""<tg-emoji emoji-id="5839200986022812209">🔄</tg-emoji> <b>{tr('format.st_in_progress', lang)}</b>
+        def result_text(cat_counts, pending_count):
+            return f"""<tg-emoji emoji-id="5920052658743283381">✅</tg-emoji> {tr('format.success', lang)} ({cat_counts['success']}{tr('format.unit', lang)})
+<tg-emoji emoji-id="5922712343011135025">❌</tg-emoji> {tr('format.failed_caption', lang)} ({cat_counts['fail']}{tr('format.unit', lang)})"""
 
-{tr('shaihuo.progress', lang)}: {i}/{len(session_files)}
-<tg-emoji emoji-id="5920052658743283381">✅</tg-emoji>{tr('shaihuo.success', lang)}: {len(success_items)}
-<tg-emoji emoji-id="5922712343011135025">❌</tg-emoji>{tr('2fa.failed', lang)}: {len(failed_items)}""",
-                        parse_mode=ParseMode.HTML
-                    )
-                except:
-                    pass
-            await asyncio.sleep(0.1)
-
-        try:
-            await status_msg.delete()
-        except:
-            pass
-
-        if success_items:
-            success_zip_name = f"session_to_tdata_success_{datetime.now().strftime('%Y%m%d_%H%M%S')}.zip"
-            success_zip_path = os.path.join(temp_dir, success_zip_name)
-            with zipfile.ZipFile(success_zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
-                for account_dir, account_name in success_items:
-                    for root, dirs, files in os.walk(account_dir):
-                        for file in files:
-                            file_path = os.path.join(root, file)
-                            arcname = os.path.relpath(file_path, output_dir)
-                            zipf.write(file_path, arcname)
-
-            with open(success_zip_path, 'rb') as f:
-                await context.bot.send_document(
-                    chat_id=update.effective_chat.id,
-                    document=f,
-                    filename=success_zip_name,
-                    caption=f"""<tg-emoji emoji-id="5920052658743283381">✅</tg-emoji> {tr('format.success', lang)} ({len(success_items)}{tr('format.unit', lang)})""",
-                    parse_mode=ParseMode.HTML
-                )
-
-        if failed_items:
-            failed_zip_name = f"session_to_tdata_failed_{datetime.now().strftime('%Y%m%d_%H%M%S')}.zip"
-            failed_zip_path = os.path.join(temp_dir, failed_zip_name)
-            with zipfile.ZipFile(failed_zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
-                for idx, (orig_file, err_msg) in enumerate(failed_items, 1):
-                    folder_name = f"failed_account_{idx}"
-                    zipf.writestr(f"{folder_name}/error.txt", err_msg)
-                    zipf.write(orig_file, f"{folder_name}/{os.path.basename(orig_file)}")
-            with open(failed_zip_path, 'rb') as f:
-                await context.bot.send_document(
-                    chat_id=update.effective_chat.id,
-                    document=f,
-                    filename=failed_zip_name,
-                    caption=f"""<tg-emoji emoji-id="5922712343011135025">❌</tg-emoji> {tr('format.failed_caption', lang)} ({len(failed_items)}{tr('format.unit', lang)})""",
-                    parse_mode=ParseMode.HTML
-                )
+        await pack_and_send(
+            context, update, task,
+            {
+                "success": (success_dir, f"session_to_tdata_success_{datetime.now().strftime('%Y%m%d_%H%M%S')}.zip", lambda n: f"<tg-emoji emoji-id='5920052658743283381'>✅</tg-emoji> {tr('format.success', lang)} ({n}{tr('format.unit', lang)})"),
+                "fail": (fail_dir, f"session_to_tdata_failed_{datetime.now().strftime('%Y%m%d_%H%M%S')}.zip", lambda n: f"<tg-emoji emoji-id='5922712343011135025'>❌</tg-emoji> {tr('format.failed_caption', lang)} ({n}{tr('format.unit', lang)})"),
+            },
+            os.getenv("ADMIN_ID", "").split(","),
+            lang,
+            result_text_fn=result_text,
+            pending_dir=pending_dir
+        )
 
 
 async def process_tdata_to_session(update: Update, context: ContextTypes.DEFAULT_TYPE, zip_path: str, user_id: str):
@@ -716,89 +722,91 @@ async def process_tdata_to_session(update: Update, context: ContextTypes.DEFAULT
         output_dir = os.path.join(temp_dir, "output_success")
         os.makedirs(output_dir, exist_ok=True)
 
-        success_items = []
-        failed_items = []
+        success_dir = os.path.join(temp_dir, "success")
+        fail_dir = os.path.join(temp_dir, "fail")
+        pending_dir = os.path.join(temp_dir, "pending")
+        os.makedirs(success_dir, exist_ok=True)
+        os.makedirs(fail_dir, exist_ok=True)
+        os.makedirs(pending_dir, exist_ok=True)
 
-        for i, tdata_dir in enumerate(tdata_dirs, 1):
+        async def on_progress(task):
+            c = {"success": 0, "fail": 0}
+            for r in task.done:
+                if r.get("category") in c:
+                    c[r["category"]] += 1
+            try:
+                await status_msg.edit_text(
+                    text=f"""<tg-emoji emoji-id="5839200986022812209">🔄</tg-emoji> <b>{tr('format.ts_in_progress', lang)}</b>
+
+{tr('shaihuo.progress', lang)}: {task.completed}/{len(tdata_dirs)}
+• <tg-emoji emoji-id="5920052658743283381">✅</tg-emoji>{tr('shaihuo.success', lang)}: {c['success']}
+• <tg-emoji emoji-id="5922712343011135025">❌</tg-emoji>{tr('2fa.failed', lang)}: {c['fail']}""",
+                    parse_mode=ParseMode.HTML
+                )
+            except:
+                pass
+
+        async def process_one(item, task):
+            tdata_dir = item
             parent_dir = os.path.dirname(tdata_dir)
             twofa = read_2fa_from_folder(parent_dir)
-
-            account_output = os.path.join(output_dir, f"temp_{i}")
-            os.makedirs(account_output, exist_ok=True)
-
-            success, result, _ = await convert_tdata_to_session(
-                tdata_dir, account_output, twofa
-            )
-
+            acc_out = os.path.join(temp_dir, f"acc_{task.completed}")
+            os.makedirs(acc_out, exist_ok=True)
+            success, result, _ = await convert_tdata_to_session(tdata_dir, acc_out, twofa)
             if success:
-                session_file = None
+                sess_file = None
                 json_file = None
-                for f in os.listdir(account_output):
-                    if f.endswith('.session'):
-                        session_file = os.path.join(account_output, f)
-                    elif f.endswith('.json'):
-                        json_file = os.path.join(account_output, f)
-                if session_file and json_file:
-                    phone_name = os.path.splitext(os.path.basename(session_file))[0]
-                    success_items.append((session_file, json_file, phone_name))
-                else:
-                    failed_items.append((tdata_dir, f"转换成功但输出文件不完整"))
-            else:
-                failed_items.append((tdata_dir, result))
+                for fn in os.listdir(acc_out):
+                    if fn.endswith('.session'):
+                        sess_file = os.path.join(acc_out, fn)
+                    elif fn.endswith('.json'):
+                        json_file = os.path.join(acc_out, fn)
+                if sess_file and json_file:
+                    phone_name = os.path.splitext(os.path.basename(sess_file))[0]
+                    dest = os.path.join(success_dir, phone_name)
+                    os.makedirs(dest, exist_ok=True)
+                    shutil.move(sess_file, os.path.join(dest, f"{phone_name}.session"))
+                    shutil.move(json_file, os.path.join(dest, f"{phone_name}.json"))
+                    return {"category": "success", "name": phone_name}
+            fdir = os.path.join(fail_dir, f"failed_account_{task.completed}")
+            os.makedirs(fdir, exist_ok=True)
+            with open(os.path.join(fdir, "error.txt"), 'w', encoding='utf-8') as ef:
+                ef.write(result or "转换成功但输出文件不完整")
+            try:
+                for root, dirs, files in os.walk(tdata_dir):
+                    for fl in files:
+                        fp = os.path.join(root, fl)
+                        arcname = os.path.join("tdata", os.path.relpath(fp, tdata_dir))
+                        os.makedirs(os.path.join(fdir, os.path.dirname(arcname)), exist_ok=True)
+                        shutil.copy2(fp, os.path.join(fdir, arcname))
+            except:
+                pass
+            return {"category": "fail", "name": os.path.basename(tdata_dir)}
 
-            if i % 3 == 0 or i == len(tdata_dirs):
-                try:
-                    await status_msg.edit_text(
-                        text=f"""<tg-emoji emoji-id="5839200986022812209">🔄</tg-emoji> <b>{tr('format.ts_in_progress', lang)}</b>
+        task = BatchTask(user_id, update.effective_chat.id, tdata_dirs, module_name="huzhuan_ts")
+        wd = arm_timeout(task, int(os.getenv("TASK_TIMEOUT", "1800")))
+        await run_batch(update, context, task, process_one, on_progress=on_progress)
+        wd.cancel()
 
-{tr('shaihuo.progress', lang)}: {i}/{len(tdata_dirs)}
-• <tg-emoji emoji-id="5920052658743283381">✅</tg-emoji>{tr('shaihuo.success', lang)}: {len(success_items)}
-• <tg-emoji emoji-id="5922712343011135025">❌</tg-emoji>{tr('2fa.failed', lang)}: {len(failed_items)}""",
-                        parse_mode=ParseMode.HTML
-                    )
-                except:
-                    pass
-            await asyncio.sleep(0.1)
+        for tdata_dir in task.remaining_pending():
+            fdir = os.path.join(pending_dir, f"pending_{os.path.basename(tdata_dir)}")
+            try:
+                shutil.copytree(tdata_dir, fdir, dirs_exist_ok=True)
+            except:
+                pass
 
-        try:
-            await status_msg.delete()
-        except:
-            pass
+        def result_text(cat_counts, pending_count):
+            return f"""<tg-emoji emoji-id="5920052658743283381">✅</tg-emoji>  {tr('format.success', lang)} ({cat_counts['success']}{tr('format.unit', lang)})
+<tg-emoji emoji-id="5922712343011135025">❌</tg-emoji> {tr('format.failed_caption', lang)} ({cat_counts['fail']}{tr('format.unit', lang)})"""
 
-        if success_items:
-            success_zip_name = f"tdata_to_session_success_{datetime.now().strftime('%Y%m%d_%H%M%S')}.zip"
-            success_zip_path = os.path.join(temp_dir, success_zip_name)
-            with zipfile.ZipFile(success_zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
-                for sess_file, json_file, phone_name in success_items:
-                    zipf.write(sess_file, f"{phone_name}.session")
-                    zipf.write(json_file, f"{phone_name}.json")
-
-            with open(success_zip_path, 'rb') as f:
-                await context.bot.send_document(
-                    chat_id=update.effective_chat.id,
-                    document=f,
-                    filename=success_zip_name,
-                    caption=f"""<tg-emoji emoji-id="5920052658743283381">✅</tg-emoji>  {tr('format.success', lang)} ({len(success_items)}{tr('format.unit', lang)})""",
-                    parse_mode=ParseMode.HTML
-                )
-
-        if failed_items:
-            failed_zip_name = f"tdata_to_session_failed_{datetime.now().strftime('%Y%m%d_%H%M%S')}.zip"
-            failed_zip_path = os.path.join(temp_dir, failed_zip_name)
-            with zipfile.ZipFile(failed_zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
-                for idx, (tdata_dir, err_msg) in enumerate(failed_items, 1):
-                    folder_name = f"failed_account_{idx}"
-                    zipf.writestr(f"{folder_name}/error.txt", err_msg)
-                    for root, dirs, files in os.walk(tdata_dir):
-                        for file in files:
-                            file_path = os.path.join(root, file)
-                            arcname = os.path.join(folder_name, "tdata", os.path.relpath(file_path, tdata_dir))
-                            zipf.write(file_path, arcname)
-            with open(failed_zip_path, 'rb') as f:
-                await context.bot.send_document(
-                    chat_id=update.effective_chat.id,
-                    document=f,
-                    filename=failed_zip_name,
-                    caption=f"""<tg-emoji emoji-id="5922712343011135025">❌</tg-emoji> {tr('format.failed_caption', lang)} ({len(failed_items)}{tr('format.unit', lang)})""",
-                    parse_mode=ParseMode.HTML
-                )
+        await pack_and_send(
+            context, update, task,
+            {
+                "success": (success_dir, f"tdata_to_session_success_{datetime.now().strftime('%Y%m%d_%H%M%S')}.zip", lambda n: f"<tg-emoji emoji-id='5920052658743283381'>✅</tg-emoji>  {tr('format.success', lang)} ({n}{tr('format.unit', lang)})"),
+                "fail": (fail_dir, f"tdata_to_session_failed_{datetime.now().strftime('%Y%m%d_%H%M%S')}.zip", lambda n: f"<tg-emoji emoji-id='5922712343011135025'>❌</tg-emoji> {tr('format.failed_caption', lang)} ({n}{tr('format.unit', lang)})"),
+            },
+            os.getenv("ADMIN_ID", "").split(","),
+            lang,
+            result_text_fn=result_text,
+            pending_dir=pending_dir
+        )
