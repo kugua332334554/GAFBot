@@ -316,6 +316,7 @@ STRINGS = {
     "recovery.total_accounts": {"zh": "总账号数", "tw": "總帳號數", "en": "Total accounts"},
     "recovery.processing": {"zh": "正在处理，请稍候...", "tw": "正在處理，請稍候...", "en": "Processing, please wait..."},
     "recovery.seconds": {"zh": "秒", "tw": "秒", "en": "s"},
+    "recovery.secured": {"zh": "已安全加固", "tw": "已安全加固", "en": "Secured"},
 
     # ---- 拆包工具 ----
     "unpack.processing": {"zh": "正在解压分析...", "tw": "正在解壓分析...", "en": "Analyzing archive..."},
