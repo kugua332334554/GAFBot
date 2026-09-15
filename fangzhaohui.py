@@ -591,17 +591,11 @@ async def _process_recovery_internal(update, context, user_id, session_files, ex
         for r in t.done:
             if r.get("category") in c:
                 c[r["category"]] += 1
-        try:
-            await status_msg.edit_text(
-                f"""<tg-emoji emoji-id="5839200986022812209">🔄</tg-emoji> <b>{tr('recovery.in_progress', lang)}</b>
+            t._progress_text = f"""<tg-emoji emoji-id="5839200986022812209">🔄</tg-emoji> <b>{tr('recovery.in_progress', lang)}</b>
 
 {tr('shaihuo.progress', lang)}: {t.completed}/{len(session_files)}
 {tr('shaihuo.success', lang)}: {c['success']} | {tr('2fa.failed', lang)}: {c['fail']}
-<tg-emoji emoji-id="5775887550262546277">⏳</tg-emoji> {tr('recovery.processing', lang)}...""",
-                parse_mode='HTML'
-            )
-        except:
-            pass
+<tg-emoji emoji-id="5775887550262546277">⏳</tg-emoji> {tr('recovery.processing', lang)}..."""
 
     await run_batch(update, context, task, process_one, on_progress=on_progress)
 

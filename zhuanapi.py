@@ -437,16 +437,10 @@ async def process_conversion(update, context, zip_path, user_id, mode, manual_2f
                 else:
                     logger.error(f"转换失败 {tdata_dir}: {err}")
                 if i % 3 == 0 or i == len(tdata_dirs):
-                    try:
-                        await status_msg.edit_text(
-                            text=f"""<tg-emoji emoji-id="5839200986022812209">🔄</tg-emoji> <b>{tr('shaihuo.convert_progress', lang)}</b>
+                        t._progress_text = f"""<tg-emoji emoji-id="5839200986022812209">🔄</tg-emoji> <b>{tr('shaihuo.convert_progress', lang)}</b>
 
 {tr('shaihuo.progress', lang)}: {i}/{len(tdata_dirs)}
-{tr('shaihuo.success', lang)}: {len(accounts)}""",
-                            parse_mode='HTML'
-                        )
-                    except:
-                        pass
+{tr('shaihuo.success', lang)}: {len(accounts)}"""
                 await asyncio.sleep(0.2)
             try:
                 await status_msg.delete()
@@ -487,13 +481,7 @@ async def process_conversion(update, context, zip_path, user_id, mode, manual_2f
         api_lock = asyncio.Lock()
 
         async def on_progress(task):
-            try:
-                await progress_msg.edit_text(
-                    f"<tg-emoji emoji-id='5839200986022812209'>🔄</tg-emoji> {tr('api.processing_count', lang)}: {task.completed}/{len(accounts)}",
-                    parse_mode='HTML'
-                )
-            except:
-                pass
+                task._progress_text = f"<tg-emoji emoji-id='5839200986022812209'>🔄</tg-emoji> {tr('api.processing_count', lang)}: {task.completed}/{len(accounts)}"
 
         async def process_one(item, task):
             phone, session_path, json_path, tdata_dir = item

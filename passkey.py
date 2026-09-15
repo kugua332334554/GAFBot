@@ -669,14 +669,8 @@ async def process_passkey_create(update, context, zip_path, user_id, status_msg)
                 cat = r.get("category")
                 if cat in c:
                     c[cat] += 1
-            try:
-                await status_msg.edit_text(
-                    f"""<tg-emoji emoji-id="5942826671290715541">⚙️</tg-emoji> <b>{tr('passkey.creating', lang)}</b>\n\n{tr('shaihuo.progress', lang)}: {task.completed}/{len(accounts)}\n<tg-emoji emoji-id="5920052658743283381">✅</tg-emoji> {tr('shaihuo.success', lang)}: {c['success']} | <tg-emoji emoji-id="5886496611835581345">❌</tg-emoji> {tr('2fa.failed', lang)}: {c['fail']}""",
-                    parse_mode='HTML'
-                )
-            except:
-                pass
 
+            task._progress_text = f"""<tg-emoji emoji-id="5942826671290715541">⚙️</tg-emoji> <b>{tr('passkey.creating', lang)}</b>\n\n{tr('shaihuo.progress', lang)}: {task.completed}/{len(accounts)}\n<tg-emoji emoji-id="5920052658743283381">✅</tg-emoji> {tr('shaihuo.success', lang)}: {c['success']} | <tg-emoji emoji-id="5886496611835581345">❌</tg-emoji> {tr('2fa.failed', lang)}: {c['fail']}"""
         async def process_one(item, task):
             session_file, json_file = item
             acc_out = os.path.join(temp_dir, f"acc_{task.completed}")
@@ -758,14 +752,8 @@ async def process_passkey_login(update, context, zip_path, user_id, status_msg):
                 cat = r.get("category")
                 if cat in c:
                     c[cat] += 1
-            try:
-                await status_msg.edit_text(
-                    f"""<tg-emoji emoji-id="5942826671290715541">⚙️</tg-emoji> <b>{tr('passkey.logging_in', lang)}</b>\n\n{tr('shaihuo.progress', lang)}: {task.completed}/{len(passkey_files)}\n<tg-emoji emoji-id="5920052658743283381">✅</tg-emoji> {tr('shaihuo.success', lang)}: {c['success']} | <tg-emoji emoji-id="5886496611835581345">❌</tg-emoji> {tr('2fa.failed', lang)}: {c['fail']}""",
-                    parse_mode='HTML'
-                )
-            except:
-                pass
 
+            task._progress_text = f"""<tg-emoji emoji-id="5942826671290715541">⚙️</tg-emoji> <b>{tr('passkey.logging_in', lang)}</b>\n\n{tr('shaihuo.progress', lang)}: {task.completed}/{len(passkey_files)}\n<tg-emoji emoji-id="5920052658743283381">✅</tg-emoji> {tr('shaihuo.success', lang)}: {c['success']} | <tg-emoji emoji-id="5886496611835581345">❌</tg-emoji> {tr('2fa.failed', lang)}: {c['fail']}"""
         async def process_one(item, task):
             pk_file = item
             acc_out = os.path.join(temp_dir, f"login_{task.completed}")

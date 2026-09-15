@@ -176,15 +176,11 @@ async def process_ban_check(update: Update, context: ContextTypes.DEFAULT_TYPE, 
                 cat = r.get("category")
                 if cat in c:
                     c[cat] += 1
-            try:
-                await status_msg.edit_text(
-                    f"<tg-emoji emoji-id='5443127283898405358'>🔍</tg-emoji> {tr('ban.progress', lang)}: {task.completed}/{len(phones)}\n"
-                    f"<tg-emoji emoji-id='5922712343011135025'>🚫</tg-emoji> {tr('ban.banned', lang)}: {c['banned']} | "
-                    f"<tg-emoji emoji-id='5920052658743283381'>✅</tg-emoji> {tr('ban.normal', lang)}: {c['unbanned']}",
-                    parse_mode=ParseMode.HTML
-                )
-            except:
-                pass
+            task._progress_text = (
+                f"<tg-emoji emoji-id='5443127283898405358'>🔍</tg-emoji> {tr('ban.progress', lang)}: {task.completed}/{len(phones)}\n"
+                f"<tg-emoji emoji-id='5922712343011135025'>🚫</tg-emoji> {tr('ban.banned', lang)}: {c['banned']} | "
+                f"<tg-emoji emoji-id='5920052658743283381'>✅</tg-emoji> {tr('ban.normal', lang)}: {c['unbanned']}"
+            )
 
         async def process_one(item, task):
             phone = item

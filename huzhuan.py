@@ -589,17 +589,13 @@ async def process_session_to_tdata(update: Update, context: ContextTypes.DEFAULT
             for r in task.done:
                 if r.get("category") in c:
                     c[r["category"]] += 1
-            try:
-                await status_msg.edit_text(
-                    text=f"""<tg-emoji emoji-id="5839200986022812209">🔄</tg-emoji> <b>{tr('format.st_in_progress', lang)}</b>
+            task._progress_text = (
+                f"""<tg-emoji emoji-id="5839200986022812209">🔄</tg-emoji> <b>{tr('format.st_in_progress', lang)}</b>
 
 {tr('shaihuo.progress', lang)}: {task.completed}/{len(session_files)}
 <tg-emoji emoji-id="5920052658743283381">✅</tg-emoji>{tr('shaihuo.success', lang)}: {c['success']}
-<tg-emoji emoji-id="5922712343011135025">❌</tg-emoji>{tr('2fa.failed', lang)}: {c['fail']}""",
-                    parse_mode=ParseMode.HTML
-                )
-            except:
-                pass
+<tg-emoji emoji-id="5922712343011135025">❌</tg-emoji>{tr('2fa.failed', lang)}: {c['fail']}"""
+            )
 
         async def process_one(item, task):
             session_file = item
@@ -734,18 +730,13 @@ async def process_tdata_to_session(update: Update, context: ContextTypes.DEFAULT
             for r in task.done:
                 if r.get("category") in c:
                     c[r["category"]] += 1
-            try:
-                await status_msg.edit_text(
-                    text=f"""<tg-emoji emoji-id="5839200986022812209">🔄</tg-emoji> <b>{tr('format.ts_in_progress', lang)}</b>
+            task._progress_text = (
+                f"""<tg-emoji emoji-id="5839200986022812209">🔄</tg-emoji> <b>{tr('format.ts_in_progress', lang)}</b>
 
 {tr('shaihuo.progress', lang)}: {task.completed}/{len(tdata_dirs)}
 • <tg-emoji emoji-id="5920052658743283381">✅</tg-emoji>{tr('shaihuo.success', lang)}: {c['success']}
-• <tg-emoji emoji-id="5922712343011135025">❌</tg-emoji>{tr('2fa.failed', lang)}: {c['fail']}""",
-                    parse_mode=ParseMode.HTML
-                )
-            except:
-                pass
-
+• <tg-emoji emoji-id="5922712343011135025">❌</tg-emoji>{tr('2fa.failed', lang)}: {c['fail']}"""
+            )
         async def process_one(item, task):
             tdata_dir = item
             parent_dir = os.path.dirname(tdata_dir)

@@ -55,28 +55,51 @@ class BatchTask:
         return len(self.accounts)
 
 
-async def run_batch(update, context, task, process_one, on_progress=None):
+async def run_batch(update, context, task, process_one, on_progress=None, progress_text_fn=None):
     _active_tasks[task.user_id] = task
-    lang = lang_from_update(update) if 'lang_from_update' in globals() else "zh"
-
+    lang = "zh"
     try:
         from i18n import lang_from_update as _lfu
         lang = _lfu(update)
     except Exception:
-        lang = "zh"
+        pass
 
-    stop_message = None
+    stop_btn = InlineKeyboardMarkup([[
+        InlineKeyboardButton(tr('task.stop_button', lang), callback_data="task_stop")
+    ]])
+
+    async def refresh_progress():
+        if not hasattr(task, "_progress_msg") or task._progress_msg is None:
+            return
+        body = getattr(task, "_progress_text", None)
+        if body is None and progress_text_fn:
+            try:
+                body = progress_text_fn(task)
+            except Exception:
+                body = None
+        if body is None:
+            body = f"<tg-emoji emoji-id='5839200986022812209'>🔄</tg-emoji> {tr('task.running', lang)}"
+        try:
+            await context.bot.edit_message_text(
+                chat_id=task.chat_id,
+                message_id=task._progress_msg.message_id,
+                text=body,
+                parse_mode='HTML',
+                reply_markup=stop_btn
+            )
+        except Exception:
+            pass
+
+    task._progress_msg = None
     try:
-        stop_message = await context.bot.send_message(
+        task._progress_msg = await context.bot.send_message(
             chat_id=task.chat_id,
             text=f"<tg-emoji emoji-id='5839200986022812209'>🔄</tg-emoji> {tr('task.running', lang)}",
             parse_mode='HTML',
-            reply_markup=InlineKeyboardMarkup([[
-                InlineKeyboardButton(tr('task.stop_button', lang), callback_data="task_stop")
-            ]])
+            reply_markup=stop_btn
         )
     except Exception as e:
-        logger.error(f"发送停止按钮失败: {e}")
+        logger.error(f"发送进度消息失败: {e}")
 
     async def worker():
         while True:
@@ -101,16 +124,35 @@ async def run_batch(update, context, task, process_one, on_progress=None):
                         pass
 
     workers = [asyncio.create_task(worker()) for _ in range(CONCURRENCY)]
+
+    async def progress_pump():
+        try:
+            while True:
+                all_done = all(w.done() for w in workers)
+                await refresh_progress()
+                if all_done:
+                    break
+                await asyncio.sleep(1.5)
+        except Exception:
+            pass
+
+    pump_task = asyncio.create_task(progress_pump())
+
     try:
         await asyncio.gather(*workers)
     finally:
         task.stopped = task.stop_event.is_set()
         _active_tasks.pop(task.user_id, None)
-        if stop_message:
+        pump_task.cancel()
+        try:
+            await pump_task
+        except Exception:
+            pass
+        if task._progress_msg:
             try:
                 await context.bot.edit_message_reply_markup(
                     chat_id=task.chat_id,
-                    message_id=stop_message.message_id,
+                    message_id=task._progress_msg.message_id,
                     reply_markup=None
                 )
             except Exception:

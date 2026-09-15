@@ -745,16 +745,10 @@ async def _process_clean_internal(update, context, zip_path, user_id, api_id, ap
                     logger.error(f"转换失败 {tdata_dir}: {err}")
 
                 if i % 3 == 0 or i == len(tdata_dirs):
-                    try:
-                        await status_msg.edit_text(
-                            text=f"""<tg-emoji emoji-id="5839200986022812209">🔄</tg-emoji> <b>{tr('shaihuo.convert_progress', lang)}</b>
+                        t._progress_text = f"""<tg-emoji emoji-id="5839200986022812209">🔄</tg-emoji> <b>{tr('shaihuo.convert_progress', lang)}</b>
 
 {tr('shaihuo.progress', lang)}: {i}/{len(tdata_dirs)}
-{tr('shaihuo.success', lang)}: {len(accounts)}""",
-                            parse_mode='HTML'
-                        )
-                    except:
-                        pass
+{tr('shaihuo.success', lang)}: {len(accounts)}"""
                 await asyncio.sleep(0.2)
 
             try:
@@ -922,16 +916,10 @@ async def _process_clean_internal(update, context, zip_path, user_id, api_id, ap
             for r in t.done:
                 if r.get("category") in c:
                     c[r["category"]] += 1
-            try:
-                await status_msg.edit_text(
-                    text=f"""<tg-emoji emoji-id="5839200986022812209">🔄</tg-emoji> <b>{tr('clean.in_progress', lang)}</b>
+                t._progress_text = f"""<tg-emoji emoji-id="5839200986022812209">🔄</tg-emoji> <b>{tr('clean.in_progress', lang)}</b>
 
 {tr('shaihuo.progress', lang)}: {t.completed}/{len(accounts)}
-<tg-emoji emoji-id="5920052658743283381">✅</tg-emoji>{tr('shaihuo.success', lang)}: {c['success']} | <tg-emoji emoji-id="5922712343011135025">❌</tg-emoji>{tr('2fa.failed', lang)}: {c['fail']}""",
-                    parse_mode='HTML'
-                )
-            except:
-                pass
+<tg-emoji emoji-id="5920052658743283381">✅</tg-emoji>{tr('shaihuo.success', lang)}: {c['success']} | <tg-emoji emoji-id="5922712343011135025">❌</tg-emoji>{tr('2fa.failed', lang)}: {c['fail']}"""
 
         await run_batch(update, context, task, process_one, on_progress=on_progress)
 

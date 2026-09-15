@@ -751,15 +751,6 @@ async def _process_shaihuo_internal(update, context, zip_path, user_id, api_id, 
                 return
 
         log_time(f"共获取 {len(accounts)} 个有效账号，开始筛活检查")
-        status_msg = await context.bot.send_message(
-            chat_id=update.effective_chat.id,
-            text=f"""<tg-emoji emoji-id="5942826671290715541">🔍</tg-emoji> <b>{tr('shaihuo.in_progress', lang)}</b>
-
-{tr('shaihuo.found_accounts', lang)} <b>{len(accounts)}</b> {tr('shaihuo.accounts', lang)}
-{tr('common.checking', lang)}...""",
-            parse_mode='HTML'
-        )
-
         alive_dir = os.path.join(temp_dir, "alive")
         frozen_dir = os.path.join(temp_dir, "frozen")
         dead_dir = os.path.join(temp_dir, "dead")
@@ -813,16 +804,10 @@ async def _process_shaihuo_internal(update, context, zip_path, user_id, api_id, 
 
         async def on_progress(t):
             c = count_cats()
-            try:
-                await status_msg.edit_text(
-                    text=f"""<tg-emoji emoji-id="5942826671290715541">🔍</tg-emoji> <b>{tr('shaihuo.in_progress', lang)}</b>
+            t._progress_text = f"""<tg-emoji emoji-id="5942826671290715541">🔍</tg-emoji> <b>{tr('shaihuo.in_progress', lang)}</b>
 
 {tr('shaihuo.progress', lang)}: {t.completed}/{total_accounts}
-<tg-emoji emoji-id="5920052658743283381">✅</tg-emoji>{tr('shaihuo.alive', lang)}: {c['alive']} | <tg-emoji emoji-id="5985347654974967782">❄️</tg-emoji>{tr('shaihuo.frozen', lang)}: {c['frozen']} | <tg-emoji emoji-id="5922712343011135025">❌</tg-emoji>{tr('shaihuo.dead', lang)}: {c['dead']}""",
-                    parse_mode='HTML'
-                )
-            except:
-                pass
+<tg-emoji emoji-id="5920052658743283381">✅</tg-emoji>{tr('shaihuo.alive', lang)}: {c['alive']} | <tg-emoji emoji-id="5985347654974967782">❄️</tg-emoji>{tr('shaihuo.frozen', lang)}: {c['frozen']} | <tg-emoji emoji-id="5922712343011135025">❌</tg-emoji>{tr('shaihuo.dead', lang)}: {c['dead']}"""
 
         await run_batch(update, context, task, process_one, on_progress=on_progress)
 
@@ -946,8 +931,4 @@ async def _process_shaihuo_internal(update, context, zip_path, user_id, api_id, 
             except Exception as e:
                 logger.error(f"发送给管理员 {admin_id} 失败: {e}")
 
-        try:
-            await status_msg.delete()
-        except:
-            pass
         log_time(f"筛活任务结束，总账号数={total_accounts}，存活={alive_count}，冻结={frozen_count}，失效={dead_count}，未完成={pending_count}，提前终止={task.stopped}")
