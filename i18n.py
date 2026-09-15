@@ -362,7 +362,6 @@ STRINGS = {
     "passkey.no_file": {"zh": "未找到 .Passkey 凭据文件", "tw": "未找到 .Passkey 憑據文件", "en": "No .Passkey credentials found"},
     "passkey.convert_progress": {"zh": "转换进度", "tw": "轉換進度", "en": "Conversion progress"},
     "passkey.session_unit": {"zh": "个会话", "tw": "個會話", "en": "sessions"},
-    "passkey.secured": {"zh": "已安全加固", "tw": "已安全加固", "en": "Secured"},
 
     # ---- 整合号包 ----
     "merge.confirm": {"zh": "确认整合", "tw": "確認整合", "en": "Confirm Merge"},
