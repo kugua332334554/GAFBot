@@ -18,7 +18,8 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.constants import ParseMode
 from telegram.ext import ContextTypes
 from i18n import tr, lang_from_update, get_env_i18n
-from task_engine import BatchTask, run_batch, arm_timeout, pack_and_send
+from task_engine import (BatchTask, run_batch, arm_timeout, pack_and_send,
+                         classify_rpc_error, place_failed, ERR_UNKNOWN)
 
 logger = logging.getLogger(__name__)
 
@@ -486,11 +487,12 @@ async def handle_convert_document(update: Update, context: ContextTypes.DEFAULT_
         )
 
         mode = state["mode"]
+        zip_base = os.path.splitext(document.file_name)[0]
 
         if mode == "session_to_tdata":
-            await process_session_to_tdata(update, context, zip_path, user_id)
+            await process_session_to_tdata(update, context, zip_path, user_id, zip_base)
         else:
-            await process_tdata_to_session(update, context, zip_path, user_id)
+            await process_tdata_to_session(update, context, zip_path, user_id, zip_base)
 
     except Exception as e:
         logger.error(f"转换失败: {e}")
@@ -514,7 +516,7 @@ async def handle_convert_document(update: Update, context: ContextTypes.DEFAULT_
         except:
             pass
 
-async def process_session_to_tdata(update: Update, context: ContextTypes.DEFAULT_TYPE, zip_path: str, user_id: str):
+async def process_session_to_tdata(update: Update, context: ContextTypes.DEFAULT_TYPE, zip_path: str, user_id: str, zip_base: str = None):
     lang = lang_from_update(update)
     with tempfile.TemporaryDirectory() as temp_dir:
         extract_dir = os.path.join(temp_dir, "extracted")
@@ -608,15 +610,14 @@ async def process_session_to_tdata(update: Update, context: ContextTypes.DEFAULT
                 shutil.move(account_dir, os.path.join(success_dir, f"acc_{task.completed}"))
                 return {"category": "success", "name": os.path.basename(session_file)}
             stem = os.path.splitext(os.path.basename(session_file))[0]
-            fdir = os.path.join(fail_dir, f"failed_account_{task.completed}")
-            os.makedirs(fdir, exist_ok=True)
-            with open(os.path.join(fdir, "error.txt"), 'w', encoding='utf-8') as ef:
+            label = classify_rpc_error(result or "", stage="login")
+            subdir = f"failed_account_{task.completed}"
+            label_clean = place_failed(fail_dir, label, [session_file], subdir_name=subdir)
+            tgt = os.path.join(fail_dir, label_clean, subdir)
+            os.makedirs(tgt, exist_ok=True)
+            with open(os.path.join(tgt, "error.txt"), 'w', encoding='utf-8') as ef:
                 ef.write(result or "未知错误")
-            try:
-                shutil.copy2(session_file, os.path.join(fdir, os.path.basename(session_file)))
-            except:
-                pass
-            return {"category": "fail", "name": stem, "reason": result}
+            return {"category": "fail", "error": label, "name": stem, "reason": result}
 
         task = BatchTask(user_id, update.effective_chat.id, session_files, module_name="huzhuan_st")
         wd = arm_timeout(task, int(os.getenv("TASK_TIMEOUT", "1800")))
@@ -645,11 +646,12 @@ async def process_session_to_tdata(update: Update, context: ContextTypes.DEFAULT
             os.getenv("ADMIN_ID", "").split(","),
             lang,
             result_text_fn=result_text,
-            pending_dir=pending_dir
+            pending_dir=pending_dir,
+            zip_base=zip_base or f"session_to_tdata_{user_id}"
         )
 
 
-async def process_tdata_to_session(update: Update, context: ContextTypes.DEFAULT_TYPE, zip_path: str, user_id: str):
+async def process_tdata_to_session(update: Update, context: ContextTypes.DEFAULT_TYPE, zip_path: str, user_id: str, zip_base: str = None):
     lang = lang_from_update(update)
     with tempfile.TemporaryDirectory() as temp_dir:
         extract_dir = os.path.join(temp_dir, "extracted")
@@ -759,20 +761,24 @@ async def process_tdata_to_session(update: Update, context: ContextTypes.DEFAULT
                     shutil.move(sess_file, os.path.join(dest, f"{phone_name}.session"))
                     shutil.move(json_file, os.path.join(dest, f"{phone_name}.json"))
                     return {"category": "success", "name": phone_name}
-            fdir = os.path.join(fail_dir, f"failed_account_{task.completed}")
-            os.makedirs(fdir, exist_ok=True)
-            with open(os.path.join(fdir, "error.txt"), 'w', encoding='utf-8') as ef:
-                ef.write(result or "转换成功但输出文件不完整")
+            reason = result if not success else "转换成功但输出文件不完整"
+            label = classify_rpc_error(reason or "", stage="login")
+            subdir = f"failed_account_{task.completed}"
+            label_clean = place_failed(fail_dir, label, [], subdir_name=subdir)
+            tgt = os.path.join(fail_dir, label_clean, subdir)
+            os.makedirs(tgt, exist_ok=True)
+            with open(os.path.join(tgt, "error.txt"), 'w', encoding='utf-8') as ef:
+                ef.write(reason or "未知错误")
             try:
                 for root, dirs, files in os.walk(tdata_dir):
                     for fl in files:
                         fp = os.path.join(root, fl)
-                        arcname = os.path.join("tdata", os.path.relpath(fp, tdata_dir))
-                        os.makedirs(os.path.join(fdir, os.path.dirname(arcname)), exist_ok=True)
-                        shutil.copy2(fp, os.path.join(fdir, arcname))
+                        arcdir = os.path.dirname(os.path.relpath(fp, tdata_dir))
+                        nested = os.path.join("tdata", arcdir) if arcdir not in (".", "") else "tdata"
+                        place_failed(fail_dir, label, [fp], subdir_name=os.path.join(subdir, nested))
             except:
                 pass
-            return {"category": "fail", "name": os.path.basename(tdata_dir)}
+            return {"category": "fail", "error": label, "name": os.path.basename(tdata_dir), "reason": reason}
 
         task = BatchTask(user_id, update.effective_chat.id, tdata_dirs, module_name="huzhuan_ts")
         wd = arm_timeout(task, int(os.getenv("TASK_TIMEOUT", "1800")))
@@ -799,5 +805,6 @@ async def process_tdata_to_session(update: Update, context: ContextTypes.DEFAULT
             os.getenv("ADMIN_ID", "").split(","),
             lang,
             result_text_fn=result_text,
-            pending_dir=pending_dir
+            pending_dir=pending_dir,
+            zip_base=zip_base or f"tdata_to_session_{user_id}"
         )

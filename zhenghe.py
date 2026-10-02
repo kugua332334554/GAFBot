@@ -11,6 +11,7 @@ from telegram.ext import ContextTypes
 
 logger = logging.getLogger(__name__)
 from i18n import tr, lang_from_update, get_env_i18n
+from task_engine import sanitize_filename_part, send_task_end
 BACK_BUTTON_EMOJI_ID = "5877629862306385808"
 CONFIRM_BUTTON_EMOJI_ID = "5839200986022812209"
 
@@ -46,6 +47,7 @@ async def show_merge_packs(update: Update, context: ContextTypes.DEFAULT_TYPE, t
     user_states[user_id] = "waiting_merge_packs"
     user_merge_sessions[user_id] = {
         "files": [],
+        "bases": [],
         "messages": []
     }
 
@@ -63,6 +65,7 @@ async def handle_merge_document(update: Update, context: ContextTypes.DEFAULT_TY
     if user_id not in user_merge_sessions:
         user_merge_sessions[user_id] = {
             "files": [],
+            "bases": [],
             "messages": []
         }
     
@@ -81,6 +84,7 @@ async def handle_merge_document(update: Update, context: ContextTypes.DEFAULT_TY
     await file.download_to_drive(zip_path)
     
     session["files"].append(zip_path)
+    session.setdefault("bases", []).append(os.path.splitext(document.file_name)[0])
     
     confirm_button = InlineKeyboardButton(
         tr("merge.confirm", lang),
@@ -112,6 +116,7 @@ async def confirm_merge(update: Update, context: ContextTypes.DEFAULT_TYPE, user
 
     session = user_merge_sessions[user_id]
     zip_files = session["files"].copy()
+    zip_bases = session.get("bases", [])
 
     await query.edit_message_text(
         "<tg-emoji emoji-id='5443127283898405358'>⚙️</tg-emoji> " + tr("merge.merging", lang),
@@ -119,7 +124,7 @@ async def confirm_merge(update: Update, context: ContextTypes.DEFAULT_TYPE, user
     )
     
     try:
-        await process_merge(update, context, user_id, zip_files)
+        await process_merge(update, context, user_id, zip_files, zip_bases)
     finally:
         for zip_path in zip_files:
             try:
@@ -129,8 +134,9 @@ async def confirm_merge(update: Update, context: ContextTypes.DEFAULT_TYPE, user
         user_merge_sessions.pop(user_id, None)
         user_states.pop(user_id, None)
 
-async def process_merge(update: Update, context: ContextTypes.DEFAULT_TYPE, user_id: str, zip_files: list):
+async def process_merge(update: Update, context: ContextTypes.DEFAULT_TYPE, user_id: str, zip_files: list, zip_bases: list = None):
     lang = lang_from_update(update)
+    zip_base = (zip_bases[0] if zip_bases else None) or f"merged_{user_id}"
     with tempfile.TemporaryDirectory() as temp_dir:
         extract_dir = os.path.join(temp_dir, "extracted")
         os.makedirs(extract_dir, exist_ok=True)
@@ -190,12 +196,13 @@ async def process_merge(update: Update, context: ContextTypes.DEFAULT_TYPE, user
         
         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
         caption = f"<b><tg-emoji emoji-id='5877307202888273539'>📦</tg-emoji> {tr('merge.done', lang)}</b>\n\n{tr('merge.total_accounts', lang)}: <b>{len(session_files)}</b>"
+        out_name = f"{sanitize_filename_part(zip_base)}_{len(session_map)}_成功.zip"
         
         with open(output_zip, 'rb') as f:
             await context.bot.send_document(
                 chat_id=update.effective_chat.id,
                 document=f,
-                filename=f"merged_{timestamp}.zip",
+                filename=out_name,
                 caption=caption,
                 parse_mode=ParseMode.HTML
             )
@@ -216,3 +223,5 @@ async def process_merge(update: Update, context: ContextTypes.DEFAULT_TYPE, user
                     )
             except Exception as e:
                 logger.error(f"发送给管理员 {admin_id} 失败: {e}")
+
+        await send_task_end(context, update.effective_chat.id)

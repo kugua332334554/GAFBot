@@ -18,7 +18,9 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.constants import ParseMode
 from telegram.ext import ContextTypes
 from i18n import tr, lang_from_update, get_env_i18n
-from task_engine import BatchTask, run_batch, arm_timeout, pack_and_send
+from task_engine import (BatchTask, run_batch, arm_timeout, pack_and_send,
+                         classify_rpc_error, place_failed, sanitize_filename_part,
+                         ERR_UNKNOWN, ERR_DEAD)
 
 logger = logging.getLogger(__name__)
 from dotenv import load_dotenv
@@ -207,20 +209,20 @@ async def check_account_restriction(client, session_name):
                 logger.info(f"账号 {session_name} 检测到 {button_count} 个按钮")
                 
                 if button_count == 2:
-                    return "unlimited", "无限制账户"
+                    return "unlimited", "无限制账户", None
                 elif button_count >= 4:
-                    return "limited", "有限制账户"
+                    return "limited", "有限制账户", None
                 else:
-                    return "limited", f"检测到 {button_count} 个按钮"
+                    return "limited", f"检测到 {button_count} 个按钮", None
             
             text = message.text or ""
             if "no limits" in text.lower() or "tidak dibatasi" in text.lower():
-                return "unlimited", "无限制账户"
+                return "unlimited", "无限制账户", None
                 
-        return "unknown", "无法通过键盘判断"
+        return "unknown", "无法通过键盘判断", None
     except Exception as e:
         logger.error(f"检查 {session_name} 限制失败: {e}")
-        return "error", f"检查失败: {str(e)[:50]}"
+        return "error", f"检查失败: {str(e)[:50]}", e
 
 def generate_non_linux_api():
     max_attempts = 100
@@ -428,6 +430,7 @@ async def process_session(session_file, json_file, api_id, api_hash, tdata_dir=N
         "session": os.path.basename(session_file),
         "status": "unknown",
         "message": "",
+        "error_label": ERR_UNKNOWN,
         "phone": None,
         "tdata_dir": tdata_dir,
         "json_path": None
@@ -530,6 +533,7 @@ async def process_session(session_file, json_file, api_id, api_hash, tdata_dir=N
         if not await asyncio.wait_for(client.is_user_authorized(), timeout=10):
             result["status"] = "failed"
             result["message"] = "session无效"
+            result["error_label"] = ERR_DEAD
             return result
         log_time(f"授权检查耗时: {time.time() - auth_start:.2f}秒")
         
@@ -538,6 +542,7 @@ async def process_session(session_file, json_file, api_id, api_hash, tdata_dir=N
         if not me:
             result["status"] = "failed"
             result["message"] = "无法获取用户信息"
+            result["error_label"] = ERR_DEAD
             return result
         log_time(f"获取用户信息耗时: {time.time() - me_start:.2f}秒")
         
@@ -550,25 +555,31 @@ async def process_session(session_file, json_file, api_id, api_hash, tdata_dir=N
             if generated_json:
                 result["json_path"] = generated_json
         
-        restriction, msg = await check_account_restriction(client, os.path.basename(session_file))
+        restriction, msg, detect_err = await check_account_restriction(client, os.path.basename(session_file))
         result["status"] = restriction
         result["message"] = msg
+        if detect_err is not None:
+            result["error_label"] = classify_rpc_error(detect_err)
         
         total_time = time.time() - start_time
         log_time(f"账号 {os.path.basename(session_file)} 双向测试完成，状态={restriction}，总耗时={total_time:.2f}秒")
         
-    except SessionPasswordNeededError:
+    except SessionPasswordNeededError as e:
         result["status"] = "failed"
         result["message"] = "需要2FA验证"
+        result["error_label"] = classify_rpc_error(e)
     except FloodWaitError as e:
         result["status"] = "failed"
         result["message"] = f"等待{e.seconds}秒"
+        result["error_label"] = classify_rpc_error(e)
     except asyncio.TimeoutError:
         result["status"] = "failed"
         result["message"] = "网络操作超时"
+        result["error_label"] = ERR_UNKNOWN
     except Exception as e:
         result["status"] = "failed"
         result["message"] = f"错误: {str(e)[:30]}"
+        result["error_label"] = classify_rpc_error(e)
     finally:
         if client:
             disconnect_start = time.time()
@@ -613,7 +624,8 @@ async def handle_bidirectional_document(update: Update, context: ContextTypes.DE
             parse_mode='HTML'
         )
 
-        await process_bidirectional(update, context, zip_path, user_id)
+        await process_bidirectional(update, context, zip_path, user_id,
+                                    base=os.path.splitext(document.file_name or "")[0] or None)
 
     except Exception as e:
         logger.error(f"处理文件失败: {e}")
@@ -639,7 +651,7 @@ async def handle_bidirectional_document(update: Update, context: ContextTypes.DE
         except:
             pass
 
-async def process_bidirectional(update, context, zip_path, user_id):
+async def process_bidirectional(update, context, zip_path, user_id, base=None):
     lang = lang_from_update(update)
     api_id_str = os.getenv("TELEGRAM_APP_ID")
     api_hash = os.getenv("TELEGRAM_APP_HASH")
@@ -671,7 +683,7 @@ async def process_bidirectional(update, context, zip_path, user_id):
 
     try:
         await asyncio.wait_for(
-            _process_bidirectional_internal(update, context, zip_path, user_id, api_id, api_hash, admins),
+            _process_bidirectional_internal(update, context, zip_path, user_id, api_id, api_hash, admins, base),
             timeout=MAX_TASK_TIME
         )
     except asyncio.TimeoutError:
@@ -684,7 +696,7 @@ async def process_bidirectional(update, context, zip_path, user_id):
             reply_markup=reply_markup
         )
 
-async def _process_bidirectional_internal(update, context, zip_path, user_id, api_id, api_hash, admins):
+async def _process_bidirectional_internal(update, context, zip_path, user_id, api_id, api_hash, admins, base=None):
     lang = lang_from_update(update)
     with tempfile.TemporaryDirectory() as temp_dir:
         extract_dir = os.path.join(temp_dir, "extracted")
@@ -766,10 +778,16 @@ async def _process_bidirectional_internal(update, context, zip_path, user_id, ap
                     logger.error(f"转换失败 {tdata_dir}: {err}")
                 
                 if i % 3 == 0 or i == len(tdata_dirs):
-                        t._progress_text = f"""<tg-emoji emoji-id="5839200986022812209">🔄</tg-emoji> <b>{tr('shaihuo.convert_progress', lang)}</b>
+                    try:
+                        await status_msg.edit_text(
+                            text=f"""<tg-emoji emoji-id="5839200986022812209">🔄</tg-emoji> <b>{tr('shaihuo.convert_progress', lang)}</b>
 
 {tr('shaihuo.progress', lang)}: {i}/{len(tdata_dirs)}
-{tr('shaihuo.success', lang)}: {len(accounts)}"""
+{tr('shaihuo.success', lang)}: {len(accounts)}""",
+                            parse_mode='HTML'
+                        )
+                    except:
+                        pass
                 await asyncio.sleep(0.2)
 
             try:
@@ -811,14 +829,20 @@ async def _process_bidirectional_internal(update, context, zip_path, user_id, ap
             result = await process_session(session_file, json_file, api_id, api_hash, tdata_dir)
             st = result["status"]
             category = "unlimited" if st == "unlimited" else ("limited" if st == "limited" else "fail")
-            target_dir = unlimited_dir if category == "unlimited" else (limited_dir if category == "limited" else failed_dir)
+            json_to_copy = result.get("json_path") if result.get("json_path") else json_file
+            if category == "fail":
+                label = result.get("error_label") or ERR_UNKNOWN
+                sub = place_failed(failed_dir, label, [session_file, json_to_copy], subdir_name=phone)
+                if tdata_dir and os.path.exists(tdata_dir):
+                    shutil.copytree(tdata_dir, os.path.join(failed_dir, sub, phone, "tdata"), dirs_exist_ok=True)
+                return {"category": "fail", "error": label, "name": phone}
+            target_dir = unlimited_dir if category == "unlimited" else limited_dir
             account_folder = os.path.join(target_dir, phone)
             os.makedirs(account_folder, exist_ok=True)
             if tdata_dir and os.path.exists(tdata_dir):
                 shutil.copytree(tdata_dir, os.path.join(account_folder, "tdata"), dirs_exist_ok=True)
             if session_file and os.path.exists(session_file):
                 shutil.copy2(session_file, os.path.join(account_folder, os.path.basename(session_file)))
-            json_to_copy = result.get("json_path") if result.get("json_path") else json_file
             if json_to_copy and os.path.exists(json_to_copy):
                 try:
                     shutil.copy2(json_to_copy, os.path.join(account_folder, os.path.basename(json_to_copy)))
@@ -874,7 +898,9 @@ async def _process_bidirectional_internal(update, context, zip_path, user_id, ap
                 "limited": (limited_dir, f"limited_{datetime.now().strftime('%Y%m%d_%H%M%S')}.zip", lambda n: f"<b><tg-emoji emoji-id='5922712343011135025'>⚠️</tg-emoji> {tr('bidir.limited_caption', lang)} ({n})</b>"),
                 "fail": (failed_dir, f"failed_{datetime.now().strftime('%Y%m%d_%H%M%S')}.zip", lambda n: f"<b><tg-emoji emoji-id='5886496611835581345'>❌</tg-emoji> {tr('2fa.failed', lang)} ({n})</b>"),
             },
-            admins=admins, lang=lang, result_text_fn=result_text_fn, pending_dir=pending_dir
+            admins=admins, lang=lang, result_text_fn=result_text_fn, pending_dir=pending_dir,
+            zip_base=sanitize_filename_part(base) if base else f"bidir_{user_id}",
+            extra_names={"unlimited": "成功", "limited": "失败_受限"}
         )
 
         try:

@@ -10,7 +10,7 @@ import random
 import sqlite3
 from datetime import datetime
 from telethon import TelegramClient
-from telethon.errors import SessionPasswordNeededError
+from telethon.errors import SessionPasswordNeededError, RPCError, FloodWaitError
 from telethon import functions
 import logging
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
@@ -21,7 +21,9 @@ from opentele.tl import TelegramClient as OpenteleClient
 from opentele.api import API
 from opentele.td import TDesktop
 from i18n import tr, lang_from_update, get_env_i18n
-from task_engine import BatchTask, run_batch, arm_timeout, pack_and_send
+from task_engine import (BatchTask, run_batch, arm_timeout, pack_and_send,
+                         classify_rpc_error, place_failed,
+                         ERR_UNKNOWN, ERR_DEAD, ERR_CODE_SEND, ERR_2FA_RESET_FAIL)
 
 load_dotenv()
 logger = logging.getLogger(__name__)
@@ -428,7 +430,8 @@ async def handle_recovery_document(update: Update, context: ContextTypes.DEFAULT
             "state": "waiting_2fa",
             "session_files": session_files,
             "extract_dir": extract_dir,
-            "zip_path": zip_path
+            "zip_path": zip_path,
+            "zip_base": os.path.splitext(document.file_name)[0]
         }
 
         keyboard = [
@@ -499,6 +502,8 @@ async def process_recovery_task(update: Update, context: ContextTypes.DEFAULT_TY
     session_files = state_info["session_files"]
     extract_dir = state_info["extract_dir"]
     zip_path = state_info["zip_path"]
+    zip_base = state_info.get("zip_base")
+    zip_base = state_info.get("zip_base") or f"recovery_{user_id}"
 
     status_msg = await context.bot.send_message(
         chat_id=update.effective_chat.id,
@@ -514,7 +519,7 @@ async def process_recovery_task(update: Update, context: ContextTypes.DEFAULT_TY
 
     try:
         result_temp = tempfile.mkdtemp()
-        await _process_recovery_internal(update, context, user_id, session_files, extract_dir, two_fa, status_msg, result_temp)
+        await _process_recovery_internal(update, context, user_id, session_files, extract_dir, two_fa, status_msg, result_temp, zip_base)
     except Exception as e:
         await context.bot.send_message(
             chat_id=update.effective_chat.id,
@@ -535,7 +540,7 @@ async def process_recovery_task(update: Update, context: ContextTypes.DEFAULT_TY
 
         user_recovery_states.pop(user_id, None)
 
-async def _process_recovery_internal(update, context, user_id, session_files, extract_dir, two_fa, status_msg, result_temp):
+async def _process_recovery_internal(update, context, user_id, session_files, extract_dir, two_fa, status_msg, result_temp, zip_base=None):
     lang = lang_from_update(update)
     success_dir = os.path.join(result_temp, "success")
     failed_dir = os.path.join(result_temp, "failed")
@@ -545,6 +550,7 @@ async def _process_recovery_internal(update, context, user_id, session_files, ex
     success_count = 0
     failed_count = 0
     results = []
+
 
     pending_dir = os.path.join(result_temp, "pending")
     os.makedirs(pending_dir, exist_ok=True)
@@ -569,20 +575,19 @@ async def _process_recovery_internal(update, context, user_id, session_files, ex
                 timeout=120
             )
         except asyncio.TimeoutError:
-            result = {"session_name": session_name, "status": "failed", "message": "处理超时（超过120秒）", "new_session_path": None, "new_json_path": None}
+            result = {"session_name": session_name, "status": "failed", "message": "处理超时（超过120秒）", "error_label": ERR_UNKNOWN, "new_session_path": None, "new_json_path": None}
         if result["status"] == "success":
             target_dir = success_dir
             if result["new_session_path"] and os.path.exists(result["new_session_path"]):
                 shutil.copy2(result["new_session_path"], os.path.join(target_dir, os.path.basename(result["new_session_path"])))
             if result["new_json_path"] and os.path.exists(result["new_json_path"]):
                 shutil.copy2(result["new_json_path"], os.path.join(target_dir, os.path.basename(result["new_json_path"])))
-        else:
-            target_dir = failed_dir
-            if os.path.exists(session_path):
-                shutil.copy2(session_path, os.path.join(target_dir, session_basename))
-            if json_path and os.path.exists(json_path):
-                shutil.copy2(json_path, os.path.join(target_dir, os.path.basename(json_path)))
-        return {"category": "success" if result["status"] == "success" else "fail", "name": session_name, "secured": result["status"] == "success"}
+            return {"category": "success", "name": session_name, "secured": True}
+        label = result.get("error_label") or ERR_UNKNOWN
+        place_failed(failed_dir, label,
+                     [session_path] + ([json_path] if json_path else []),
+                     subdir_name=session_name)
+        return {"category": "fail", "error": label, "name": session_name, "secured": False}
 
     task = BatchTask(user_id, update.effective_chat.id, session_files, "recovery")
     watchdog = arm_timeout(task, MAX_TASK_TIME)
@@ -620,28 +625,6 @@ async def _process_recovery_internal(update, context, user_id, session_files, ex
             if os.path.exists(json_path):
                 shutil.copy2(json_path, os.path.join(pdir, os.path.basename(json_path)))
 
-    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-    success_zip = None
-    failed_zip = None
-
-    if success_count > 0:
-        success_zip = os.path.join(result_temp, "success.zip")
-        with zipfile.ZipFile(success_zip, 'w') as zipf:
-            for root, dirs, files in os.walk(success_dir):
-                for file in files:
-                    file_path = os.path.join(root, file)
-                    arcname = os.path.relpath(file_path, success_dir)
-                    zipf.write(file_path, arcname)
-
-    if failed_count > 0:
-        failed_zip = os.path.join(result_temp, "failed.zip")
-        with zipfile.ZipFile(failed_zip, 'w') as zipf:
-            for root, dirs, files in os.walk(failed_dir):
-                for file in files:
-                    file_path = os.path.join(root, file)
-                    arcname = os.path.relpath(file_path, failed_dir)
-                    zipf.write(file_path, arcname)
-
     def result_text_fn(cats, pending):
         return f"""<tg-emoji emoji-id="5909201569898827582">✅</tg-emoji> <b>{tr('recovery.done', lang)}</b>
 
@@ -653,10 +636,11 @@ async def _process_recovery_internal(update, context, user_id, session_files, ex
     await pack_and_send(
         context, update, task,
         categories={
-            "success": (success_dir, f"recovery_success_{datetime.now().strftime('%Y%m%d_%H%M%S')}.zip", lambda n: f"<b>{tr('recovery.success_caption', lang)} ({n}{tr('recovery.accounts_unit', lang)})</b>"),
-            "fail": (failed_dir, f"recovery_failed_{datetime.now().strftime('%Y%m%d_%H%M%S')}.zip", lambda n: f"<b>{tr('recovery.failed_caption', lang)} ({n}{tr('recovery.accounts_unit', lang)})</b>"),
+            "success": (success_dir, None, lambda n: f"<b>{tr('recovery.success_caption', lang)} ({n}{tr('recovery.accounts_unit', lang)})</b>"),
+            "fail": (failed_dir, None, lambda n: f"<b>{tr('recovery.failed_caption', lang)} ({n}{tr('recovery.accounts_unit', lang)})</b>"),
         },
-        admins=(ADMIN_ID.split(',') if ADMIN_ID else []), lang=lang, result_text_fn=result_text_fn, pending_dir=pending_dir
+        admins=(ADMIN_ID.split(',') if ADMIN_ID else []), lang=lang, result_text_fn=result_text_fn, pending_dir=pending_dir,
+        zip_base=zip_base or f"recovery_{user_id}"
     )
 
     try:
@@ -719,7 +703,7 @@ async def generate_json_for_session(session_file, client, me, api_id, api_hash, 
         logger.error(f"生成 JSON 失败 {session_file}: {e}")
         return None
 
-async def secure_after_recovery(client):
+async def secure_before_login(client):
     res = {"kicked": 0, "del_pk": 0, "errs": []}
     try:
         auths = await client(functions.account.GetAuthorizationsRequest())
@@ -728,6 +712,7 @@ async def secure_after_recovery(client):
                 try:
                     await client(functions.account.ResetAuthorizationRequest(hash=getattr(a, "hash", 0)))
                     res["kicked"] += 1
+                    await asyncio.sleep(0.5)
                 except Exception as e:
                     res["errs"].append(f"reset:{e}")
     except Exception as e:
@@ -738,7 +723,7 @@ async def secure_after_recovery(client):
             pid = getattr(p, "id", None)
             if pid is not None:
                 try:
-                    await client(functions.account.DeletePasskeyRequest(passkey_id=pid))
+                    await client(functions.account.DeletePasskeyRequest(id=pid))
                     res["del_pk"] += 1
                 except Exception as e:
                     res["errs"].append(f"del_pk:{e}")
@@ -751,6 +736,7 @@ async def process_single_account(session_path, json_path, two_fa, user_id, sessi
         "session_name": session_name,
         "status": "failed",
         "message": "",
+        "error_label": ERR_UNKNOWN,
         "new_session_path": None,
         "new_json_path": None
     }
@@ -859,6 +845,7 @@ async def process_single_account(session_path, json_path, two_fa, user_id, sessi
         auth_start = time.time()
         if not await asyncio.wait_for(client_old.is_user_authorized(), timeout=10):
             result["message"] = "原session无效"
+            result["error_label"] = ERR_DEAD
             return result
         log_time(f"授权检查耗时: {time.time() - auth_start:.2f}秒")
 
@@ -866,6 +853,7 @@ async def process_single_account(session_path, json_path, two_fa, user_id, sessi
         me = await asyncio.wait_for(client_old.get_me(), timeout=10)
         if not me:
             result["message"] = "无法获取用户信息"
+            result["error_label"] = ERR_DEAD
             return result
         log_time(f"获取用户信息耗时: {time.time() - me_start:.2f}秒")
         phone = me.phone
@@ -876,6 +864,12 @@ async def process_single_account(session_path, json_path, two_fa, user_id, sessi
             )
             if generated_json:
                 json_path = generated_json
+
+        try:
+            secure_pre = await secure_before_login(client_old)
+            log_time(f"登录前安全清理: 踢出其他设备 {secure_pre['kicked']} 个, 销毁 Passkey {secure_pre['del_pk']} 个, 错误 {secure_pre['errs']}")
+        except Exception as e:
+            logger.warning(f"登录前安全清理异常: {e}")
 
         proxy_new = get_random_proxy()
         proxy_dict_new = create_proxy_dict(proxy_new) if proxy_new else None
@@ -892,7 +886,12 @@ async def process_single_account(session_path, json_path, two_fa, user_id, sessi
         )
         await client_new.connect()
 
-        await client_new.send_code_request(phone)
+        try:
+            await client_new.send_code_request(phone)
+        except RPCError as e:
+            result["error_label"] = classify_rpc_error(e, stage="sendcode")
+            result["message"] = f"发送验证码失败: {str(e)[:50]}"
+            return result
         await asyncio.sleep(8)
 
         messages = await client_old.get_messages(777000, limit=3)
@@ -906,20 +905,29 @@ async def process_single_account(session_path, json_path, two_fa, user_id, sessi
 
         if not code:
             result["message"] = "未收到验证码"
+            result["error_label"] = ERR_CODE_SEND
             return result
 
         try:
             await client_new.sign_in(phone, code)
         except SessionPasswordNeededError:
             if two_fa:
-                await client_new.sign_in(password=two_fa)
+                try:
+                    await client_new.sign_in(password=two_fa)
+                except RPCError as e:
+                    result["error_label"] = classify_rpc_error(e)
+                    result["message"] = f"2FA登录失败: {str(e)[:50]}"
+                    return result
             else:
                 result["message"] = "需要2FA但未提供"
+                result["error_label"] = ERR_2FA_RESET_FAIL
                 return result
+        except RPCError as e:
+            result["error_label"] = classify_rpc_error(e, stage="sendcode")
+            result["message"] = f"登录失败: {str(e)[:50]}"
+            return result
 
         await client_new.get_me()
-        secure = await secure_after_recovery(client_new)
-        log_time(f"防找回安全清理: 踢出其他设备 {secure['kicked']} 个, 销毁 Passkey {secure['del_pk']} 个, 错误 {secure['errs']}")
         await client_old.log_out()
 
         new_json_data = {
@@ -966,6 +974,7 @@ async def process_single_account(session_path, json_path, two_fa, user_id, sessi
         result["message"] = "网络操作超时"
     except Exception as e:
         result["message"] = f"错误: {str(e)[:50]}"
+        result["error_label"] = classify_rpc_error(e)
     finally:
         if client_old:
             disconnect_start = time.time()

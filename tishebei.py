@@ -21,7 +21,9 @@ from telegram.ext import ContextTypes
 from dotenv import load_dotenv
 
 from i18n import tr, lang_from_update, get_env_i18n
-from task_engine import BatchTask, run_batch, arm_timeout, pack_and_send
+from task_engine import (BatchTask, run_batch, arm_timeout, pack_and_send,
+                         classify_rpc_error, place_failed,
+                         ERR_UNKNOWN, ERR_DEAD, ERR_2FA_RESET_FAIL)
 
 load_dotenv()
 logger = logging.getLogger(__name__)
@@ -425,6 +427,7 @@ async def check_session_kick(session_file, json_file, api_id, api_hash, tdata_di
         "session": os.path.basename(session_file),
         "status": "unknown",
         "message": "",
+        "error_label": ERR_UNKNOWN,
         "json_file": json_file,
         "tdata_dir": tdata_dir
     }
@@ -535,6 +538,7 @@ async def check_session_kick(session_file, json_file, api_id, api_hash, tdata_di
         if not await asyncio.wait_for(client.is_user_authorized(), timeout=10):
             result["status"] = "failed"
             result["message"] = "session无效"
+            result["error_label"] = ERR_DEAD
             return result
         log_time(f"授权检查耗时: {time.time() - auth_start:.2f}秒")
 
@@ -543,6 +547,7 @@ async def check_session_kick(session_file, json_file, api_id, api_hash, tdata_di
         if not me:
             result["status"] = "failed"
             result["message"] = "无法获取用户信息"
+            result["error_label"] = ERR_DEAD
             return result
         log_time(f"获取用户信息耗时: {time.time() - me_start:.2f}秒")
 
@@ -554,6 +559,7 @@ async def check_session_kick(session_file, json_file, api_id, api_hash, tdata_di
             except SessionPasswordNeededError:
                 result["status"] = "failed"
                 result["message"] = "2FA密码错误"
+                result["error_label"] = ERR_2FA_RESET_FAIL
                 return result
             except Exception as e:
                 pass
@@ -578,15 +584,19 @@ async def check_session_kick(session_file, json_file, api_id, api_hash, tdata_di
     except SessionPasswordNeededError:
         result["status"] = "failed"
         result["message"] = "需要2FA验证"
+        result["error_label"] = ERR_2FA_RESET_FAIL
     except FloodWaitError as e:
         result["status"] = "failed"
         result["message"] = f"等待{e.seconds}秒"
+        result["error_label"] = classify_rpc_error(e)
     except asyncio.TimeoutError:
         result["status"] = "failed"
         result["message"] = "网络操作超时"
+        result["error_label"] = ERR_UNKNOWN
     except Exception as e:
         result["status"] = "failed"
         result["message"] = f"错误: {str(e)[:30]}"
+        result["error_label"] = classify_rpc_error(e)
     finally:
         if client:
             disconnect_start = time.time()
@@ -601,6 +611,7 @@ async def check_session_kick(session_file, json_file, api_id, api_hash, tdata_di
 async def handle_kick_document(update: Update, context: ContextTypes.DEFAULT_TYPE, user_id):
     lang = lang_from_update(update)
     document = update.message.document
+    zip_base = os.path.splitext(document.file_name or "")[0]
 
     if not document.file_name.endswith('.zip'):
         keyboard = [[create_back_button(lang)]]
@@ -630,7 +641,7 @@ async def handle_kick_document(update: Update, context: ContextTypes.DEFAULT_TYP
             parse_mode='HTML'
         )
 
-        await process_kick(update, context, zip_path, user_id)
+        await process_kick(update, context, zip_path, user_id, zip_base)
 
         try:
             os.remove(zip_path)
@@ -654,7 +665,7 @@ async def handle_kick_document(update: Update, context: ContextTypes.DEFAULT_TYP
         except:
             pass
 
-async def process_kick(update, context, zip_path, user_id):
+async def process_kick(update, context, zip_path, user_id, zip_base=None):
     lang = lang_from_update(update)
     file_size = os.path.getsize(zip_path)
     if file_size > MAX_ZIP_SIZE:
@@ -699,9 +710,9 @@ async def process_kick(update, context, zip_path, user_id):
         )
         return
 
-    await _process_kick_internal(update, context, zip_path, user_id, api_id, api_hash, admins)
+    await _process_kick_internal(update, context, zip_path, user_id, api_id, api_hash, admins, zip_base)
 
-async def _process_kick_internal(update, context, zip_path, user_id, api_id, api_hash, admins):
+async def _process_kick_internal(update, context, zip_path, user_id, api_id, api_hash, admins, zip_base=None):
     lang = lang_from_update(update)
     with tempfile.TemporaryDirectory() as temp_dir:
         extract_dir = os.path.join(temp_dir, "extracted")
@@ -781,10 +792,16 @@ async def _process_kick_internal(update, context, zip_path, user_id, api_id, api
                     logger.error(f"转换失败 {tdata_dir}: {err}")
 
                 if i % 3 == 0 or i == len(tdata_dirs):
-                        t._progress_text = f"""<tg-emoji emoji-id="5839200986022812209">🔄</tg-emoji> <b>{tr('shaihuo.convert_progress', lang)}</b>
+                    try:
+                        await status_msg.edit_text(
+                            text=f"""<tg-emoji emoji-id="5839200986022812209">🔄</tg-emoji> <b>{tr('shaihuo.convert_progress', lang)}</b>
 
 {tr('shaihuo.progress', lang)}: {i}/{len(tdata_dirs)}
-{tr('shaihuo.success', lang)}: {len(accounts)}"""
+{tr('shaihuo.success', lang)}: {len(accounts)}""",
+                            parse_mode='HTML'
+                        )
+                    except:
+                        pass
                 await asyncio.sleep(0.2)
 
             try:
@@ -829,20 +846,28 @@ async def _process_kick_internal(update, context, zip_path, user_id, api_id, api
             phone, session_file, json_file, tdata_dir = item
             result = await check_session_kick(session_file, json_file, api_id, api_hash, tdata_dir)
             new_json = result.get("json_file") or json_file
-            category = "success" if result["status"] == "success" else "fail"
-            target_dir = success_dir if category == "success" else failed_dir
-            account_folder = os.path.join(target_dir, phone)
-            os.makedirs(account_folder, exist_ok=True)
+            if result["status"] == "success":
+                account_folder = os.path.join(success_dir, phone)
+                os.makedirs(account_folder, exist_ok=True)
+                if tdata_dir and os.path.exists(tdata_dir):
+                    shutil.copytree(tdata_dir, os.path.join(account_folder, "tdata"), dirs_exist_ok=True)
+                if session_file and os.path.exists(session_file):
+                    shutil.copy2(session_file, os.path.join(account_folder, os.path.basename(session_file)))
+                if new_json and os.path.exists(new_json):
+                    try:
+                        shutil.copy2(new_json, os.path.join(account_folder, os.path.basename(new_json)))
+                    except:
+                        pass
+                return {"category": "success", "name": phone}
+            label = result.get("error_label") or ERR_UNKNOWN
+            sf = place_failed(failed_dir, label,
+                              [x for x in [session_file, new_json] if x],
+                              subdir_name=phone)
             if tdata_dir and os.path.exists(tdata_dir):
-                shutil.copytree(tdata_dir, os.path.join(account_folder, "tdata"), dirs_exist_ok=True)
-            if session_file and os.path.exists(session_file):
-                shutil.copy2(session_file, os.path.join(account_folder, os.path.basename(session_file)))
-            if new_json and os.path.exists(new_json):
-                try:
-                    shutil.copy2(new_json, os.path.join(account_folder, os.path.basename(new_json)))
-                except:
-                    pass
-            return {"category": category, "name": phone}
+                fail_folder = os.path.join(failed_dir, sf, phone)
+                os.makedirs(fail_folder, exist_ok=True)
+                shutil.copytree(tdata_dir, os.path.join(fail_folder, "tdata"), dirs_exist_ok=True)
+            return {"category": "fail", "error": label, "name": phone}
 
         task = BatchTask(user_id, update.effective_chat.id, accounts, "kick")
         watchdog = arm_timeout(task, MAX_TASK_TIME)
@@ -890,7 +915,8 @@ async def _process_kick_internal(update, context, zip_path, user_id, api_id, api
                 "success": (success_dir, f"success_{datetime.now().strftime('%Y%m%d_%H%M%S')}.zip", lambda n: f"<b><tg-emoji emoji-id='5920052658743283381'>✅</tg-emoji> {tr('kick.success_caption', lang)} ({n})</b>"),
                 "fail": (failed_dir, f"failed_{datetime.now().strftime('%Y%m%d_%H%M%S')}.zip", lambda n: f"<b><tg-emoji emoji-id='5922712343011135025'>❌</tg-emoji> {tr('2fa.failed', lang)} ({n})</b>"),
             },
-            admins=admins, lang=lang, result_text_fn=result_text_fn, pending_dir=pending_dir
+            admins=admins, lang=lang, result_text_fn=result_text_fn, pending_dir=pending_dir,
+            zip_base=zip_base or f"kick_{user_id}"
         )
 
         try:

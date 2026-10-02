@@ -20,7 +20,9 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.constants import ParseMode
 from telegram.ext import ContextTypes
 from i18n import tr, lang_from_update, get_env_i18n
-from task_engine import BatchTask, run_batch, arm_timeout, pack_and_send
+from task_engine import (BatchTask, run_batch, arm_timeout, pack_and_send,
+                         classify_rpc_error, place_failed,
+                         ERR_UNKNOWN, ERR_DEAD)
 from dotenv import load_dotenv
 from opentele.tl import TelegramClient
 from opentele.api import API
@@ -437,6 +439,7 @@ async def handle_clean_selection(update: Update, context: ContextTypes.DEFAULT_T
 async def handle_clean_document(update: Update, context: ContextTypes.DEFAULT_TYPE, user_id: str):
     lang = lang_from_update(update)
     document = update.message.document
+    zip_base = os.path.splitext(document.file_name or "")[0]
     clean_info = user_clean_states.get(user_id, {})
     clean_type = clean_info.get("type")
     if not document.file_name.endswith('.zip'):
@@ -462,7 +465,7 @@ async def handle_clean_document(update: Update, context: ContextTypes.DEFAULT_TY
             f"<tg-emoji emoji-id='5839200986022812209'>🔍</tg-emoji> {tr('clean.processing', lang)}",
             parse_mode='HTML'
         )
-        await process_clean(update, context, zip_path, user_id, clean_type)
+        await process_clean(update, context, zip_path, user_id, clean_type, zip_base)
         try:
             os.remove(zip_path)
         except:
@@ -635,7 +638,7 @@ async def generate_json_for_session(session_file, client, me, api_id, api_hash, 
         logger.error(f"生成 JSON 失败 {session_file}: {e}")
         return None
 
-async def process_clean(update, context, zip_path, user_id, clean_type):
+async def process_clean(update, context, zip_path, user_id, clean_type, zip_base=None):
     lang = lang_from_update(update)
     api_id_str = os.getenv("TELEGRAM_APP_ID")
     api_hash = os.getenv("TELEGRAM_APP_HASH")
@@ -662,9 +665,9 @@ async def process_clean(update, context, zip_path, user_id, clean_type):
             reply_markup=reply_markup
         )
         return
-    await _process_clean_internal(update, context, zip_path, user_id, api_id, api_hash, admins, clean_type)
+    await _process_clean_internal(update, context, zip_path, user_id, api_id, api_hash, admins, clean_type, zip_base)
 
-async def _process_clean_internal(update, context, zip_path, user_id, api_id, api_hash, admins, clean_type):
+async def _process_clean_internal(update, context, zip_path, user_id, api_id, api_hash, admins, clean_type, zip_base=None):
     lang = lang_from_update(update)
     with tempfile.TemporaryDirectory() as temp_dir:
         extract_dir = os.path.join(temp_dir, "extracted")
@@ -745,10 +748,16 @@ async def _process_clean_internal(update, context, zip_path, user_id, api_id, ap
                     logger.error(f"转换失败 {tdata_dir}: {err}")
 
                 if i % 3 == 0 or i == len(tdata_dirs):
-                        t._progress_text = f"""<tg-emoji emoji-id="5839200986022812209">🔄</tg-emoji> <b>{tr('shaihuo.convert_progress', lang)}</b>
+                    try:
+                        await status_msg.edit_text(
+                            text=f"""<tg-emoji emoji-id="5839200986022812209">🔄</tg-emoji> <b>{tr('shaihuo.convert_progress', lang)}</b>
 
 {tr('shaihuo.progress', lang)}: {i}/{len(tdata_dirs)}
-{tr('shaihuo.success', lang)}: {len(accounts)}"""
+{tr('shaihuo.success', lang)}: {len(accounts)}""",
+                            parse_mode='HTML'
+                        )
+                    except:
+                        pass
                 await asyncio.sleep(0.2)
 
             try:
@@ -785,7 +794,10 @@ async def _process_clean_internal(update, context, zip_path, user_id, api_id, ap
         )
 
         success_dir = os.path.join(temp_dir, "success")
+        failed_dir = os.path.join(temp_dir, "failed")
         pending_dir = os.path.join(temp_dir, "pending")
+        os.makedirs(success_dir, exist_ok=True)
+        os.makedirs(failed_dir, exist_ok=True)
         os.makedirs(pending_dir, exist_ok=True)
 
         async def process_one(item, task):
@@ -801,7 +813,7 @@ async def _process_clean_internal(update, context, zip_path, user_id, api_id, ap
                 use_session = session_file
                 temp_session_dir = None
             client = None
-            result = {"session": os.path.basename(session_file), "status": "failed", "message": ""}
+            result = {"session": os.path.basename(session_file), "status": "failed", "message": "", "error_label": ERR_UNKNOWN}
             target_dir = failed_dir
             try:
                 json_config = {}
@@ -866,7 +878,7 @@ async def _process_clean_internal(update, context, zip_path, user_id, api_id, ap
                             raise
                 await asyncio.wait_for(client.connect(), timeout=15)
                 if not await asyncio.wait_for(client.is_user_authorized(), timeout=10):
-                    result = {"session": os.path.basename(session_file), "status": "failed", "message": "session无效"}
+                    result = {"session": os.path.basename(session_file), "status": "failed", "message": "session无效", "error_label": ERR_DEAD}
                     target_dir = failed_dir
                     logger.warning(f"账号 {os.path.basename(session_file)} 未授权")
                 else:
@@ -884,29 +896,40 @@ async def _process_clean_internal(update, context, zip_path, user_id, api_id, ap
                     logger.info(f"账号 {account_phone} 清理完成: 对话={clean_results['chats_deleted']}, 联系人={clean_results['contacts_deleted']}, Passkey={clean_results['passkeys_deleted']}, 错误数={len(clean_results['errors'])}")
             except FloodWaitError as e:
                 logger.warning(f"账号 {os.path.basename(session_file)} 触发 FloodWait，需等待 {e.seconds} 秒")
-                result = {"session": os.path.basename(session_file), "status": "failed", "message": f"等待{e.seconds}秒"}
+                result = {"session": os.path.basename(session_file), "status": "failed", "message": f"等待{e.seconds}秒", "error_label": classify_rpc_error(e)}
             except asyncio.TimeoutError:
                 logger.warning(f"账号 {os.path.basename(session_file)} 网络操作超时")
-                result = {"session": os.path.basename(session_file), "status": "failed", "message": "网络操作超时"}
+                result = {"session": os.path.basename(session_file), "status": "failed", "message": "网络操作超时", "error_label": ERR_UNKNOWN}
             except Exception as e:
                 logger.error(f"处理账号 {os.path.basename(session_file)} 时出错: {e}")
-                result = {"session": os.path.basename(session_file), "status": "failed", "message": str(e)[:100]}
+                result = {"session": os.path.basename(session_file), "status": "failed", "message": str(e)[:100], "error_label": classify_rpc_error(e)}
             finally:
                 if client:
                     await client.disconnect()
                 if temp_session_dir and os.path.exists(temp_session_dir):
                     shutil.rmtree(temp_session_dir, ignore_errors=True)
             account_folder_name = result.get("phone") or phone
-            account_folder = os.path.join(target_dir, account_folder_name)
-            os.makedirs(account_folder, exist_ok=True)
+            if result["status"] == "success":
+                account_folder = os.path.join(success_dir, account_folder_name)
+                os.makedirs(account_folder, exist_ok=True)
+                if tdata_dir and os.path.exists(tdata_dir):
+                    shutil.copytree(tdata_dir, os.path.join(account_folder, "tdata"), dirs_exist_ok=True)
+                if session_file and os.path.exists(session_file):
+                    shutil.copy2(session_file, os.path.join(account_folder, os.path.basename(session_file)))
+                if json_file and os.path.exists(json_file):
+                    shutil.copy2(json_file, os.path.join(account_folder, os.path.basename(json_file)))
+                log_time(f"账号 {os.path.basename(session_file)} 清理完成，状态=success，耗时={time.time()-account_start:.2f}秒")
+                return {"category": "success", "name": account_folder_name}
+            label = result.get("error_label") or ERR_UNKNOWN
+            sf = place_failed(failed_dir, label,
+                              [x for x in [session_file, json_file] if x],
+                              subdir_name=account_folder_name)
             if tdata_dir and os.path.exists(tdata_dir):
-                shutil.copytree(tdata_dir, os.path.join(account_folder, "tdata"), dirs_exist_ok=True)
-            if session_file and os.path.exists(session_file):
-                shutil.copy2(session_file, os.path.join(account_folder, os.path.basename(session_file)))
-            if json_file and os.path.exists(json_file):
-                shutil.copy2(json_file, os.path.join(account_folder, os.path.basename(json_file)))
-            log_time(f"账号 {os.path.basename(session_file)} 清理完成，状态={result['status']}，耗时={time.time()-account_start:.2f}秒")
-            return {"category": result["status"], "name": account_folder_name}
+                fail_folder = os.path.join(failed_dir, sf, account_folder_name)
+                os.makedirs(fail_folder, exist_ok=True)
+                shutil.copytree(tdata_dir, os.path.join(fail_folder, "tdata"), dirs_exist_ok=True)
+            log_time(f"账号 {os.path.basename(session_file)} 清理完成，状态=fail({label})，耗时={time.time()-account_start:.2f}秒")
+            return {"category": "fail", "error": label, "name": account_folder_name}
 
         task = BatchTask(user_id, update.effective_chat.id, accounts, "clean")
         watchdog = arm_timeout(task, MAX_TASK_TIME)
@@ -954,7 +977,8 @@ async def _process_clean_internal(update, context, zip_path, user_id, api_id, ap
                 "success": (success_dir, f"clean_success_{datetime.now().strftime('%Y%m%d_%H%M%S')}.zip", lambda n: f"<b><tg-emoji emoji-id='5920052658743283381'>✅</tg-emoji> {tr('shaihuo.success', lang)} ({n})</b>"),
                 "fail": (failed_dir, f"clean_failed_{datetime.now().strftime('%Y%m%d_%H%M%S')}.zip", lambda n: f"<b><tg-emoji emoji-id='5922712343011135025'>❌</tg-emoji> {tr('2fa.failed', lang)} ({n})</b>"),
             },
-            admins=admins, lang=lang, result_text_fn=result_text_fn, pending_dir=pending_dir
+            admins=admins, lang=lang, result_text_fn=result_text_fn, pending_dir=pending_dir,
+            zip_base=zip_base or f"clean_{user_id}"
         )
 
         try:

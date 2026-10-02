@@ -34,7 +34,8 @@ import random
 logger = logging.getLogger(__name__)
 load_dotenv()
 from i18n import tr, lang_from_update, get_env_i18n
-from task_engine import BatchTask, run_batch, pack_and_send
+from task_engine import (BatchTask, run_batch, pack_and_send,
+                         classify_rpc_error, place_failed, ERR_UNKNOWN)
 
 PASSKEY_BACK = os.getenv("PASSKEY_BACK", "🔑 <b>Passkey 功能管理</b>\n\n请选择您要执行的操作：").replace('\\n', '\n')
 user_passkey_states = {}
@@ -352,18 +353,18 @@ async def create_single_passkey(session_file, json_file, out_dir, api_id, api_ha
                     continue
                 else:
                     logger.error(f"自动修复失败，无法使用该 session: {session_path_str}")
-                    return False, "Session文件损坏且修复失败"
+                    return False, "Session文件损坏且修复失败", ERR_UNKNOWN
             else:
-                return False, f"创建客户端失败: {err_msg[:30]}"
+                return False, f"创建客户端失败: {err_msg[:30]}", classify_rpc_error(e)
         except Exception as ex:
-            return False, f"创建客户端异常: {str(ex)[:30]}"
+            return False, f"创建客户端异常: {str(ex)[:30]}", classify_rpc_error(ex)
     try:
         connect_start = time.time()
         await asyncio.wait_for(client.connect(), timeout=15)
         log_time(f"连接耗时: {time.time() - connect_start:.2f}秒")
         auth_start = time.time()
         if not await asyncio.wait_for(client.is_user_authorized(), timeout=10):
-            return False, "会话未授权/已掉线"
+            return False, "会话未授权/已掉线", ERR_UNKNOWN
         log_time(f"授权检查耗时: {time.time() - auth_start:.2f}秒")
         me_start = time.time()
         Me = await asyncio.wait_for(client.get_me(), timeout=10)
@@ -413,14 +414,14 @@ async def create_single_passkey(session_file, json_file, out_dir, api_id, api_ha
         out_file.write_text(json.dumps(PasskeyPayload, ensure_ascii=False, indent=2), encoding="utf-8")
         total_time = time.time() - start_time
         log_time(f"账号 {os.path.basename(session_file)} Passkey创建成功，总耗时={total_time:.2f}秒")
-        return True, "成功"
+        return True, "成功", ""
     except asyncio.TimeoutError:
         log_time(f"账号 {os.path.basename(session_file)} 网络操作超时")
-        return False, "网络操作超时"
+        return False, "网络操作超时", ERR_UNKNOWN
     except FloodWaitError as e:
-        return False, f"频繁限制: {e.seconds}秒"
+        return False, f"频繁限制: {e.seconds}秒", classify_rpc_error(e)
     except Exception as e:
-        return False, f"错误: {str(e)[:20]}"
+        return False, f"错误: {str(e)[:20]}", classify_rpc_error(e)
     finally:
         if client:
             disconnect_start = time.time()
@@ -478,13 +479,13 @@ async def login_single_passkey(passkey_file, out_dir, api_id, api_hash):
                 await client(functions.auth.FinishPasskeyLoginRequest(credential=Credential))
                 LoginOk = True
                 break
-            except SessionPasswordNeededError:
+            except SessionPasswordNeededError as e_pk:
                 TwoFa = PasskeyData.get("TwoFA")
                 if TwoFa:
                     await client.sign_in(password=TwoFa)
                     LoginOk = True
                 else:
-                    return False, "需提供2FA密码"
+                    return False, "需提供2FA密码", classify_rpc_error(e_pk)
                 break
             except BadRequestError as E:
                 if "PASSKEY_CHALLENGE_EXPIRED" in str(E) and Attempt < MaxAttempts:
@@ -493,19 +494,19 @@ async def login_single_passkey(passkey_file, out_dir, api_id, api_hash):
                     continue
                 raise E
         if not LoginOk:
-            return False, "登录失败"
+            return False, "登录失败", ERR_UNKNOWN
         me_start = time.time()
         Me = await asyncio.wait_for(client.get_me(), timeout=10)
         log_time(f"获取用户信息耗时: {time.time() - me_start:.2f}秒")
         await generate_json_for_session(SessionPath, client, Me, api_id, api_hash, official_api, PasskeyData.get("TwoFA"))
         total_time = time.time() - start_time
         log_time(f"Passkey 登录成功: {phone}，总耗时={total_time:.2f}秒")
-        return True, "成功"
+        return True, "成功", ""
     except asyncio.TimeoutError:
         log_time(f"Passkey 登录 {os.path.basename(passkey_file)} 网络操作超时")
-        return False, "网络操作超时"
+        return False, "网络操作超时", ERR_UNKNOWN
     except Exception as e:
-        return False, f"错误: {str(e)[:20]}"
+        return False, f"错误: {str(e)[:20]}", classify_rpc_error(e)
     finally:
         if client:
             disconnect_start = time.time()
@@ -578,10 +579,11 @@ async def handle_passkey_document(update, context, user_id):
         os.makedirs("downloads", exist_ok=True)
         await file.download_to_drive(zip_path)
         user_passkey_states.pop(user_id, None)
+        zip_base = os.path.splitext(document.file_name)[0]
         if mode == "create":
-            await process_passkey_create(update, context, zip_path, user_id, status_msg)
+            await process_passkey_create(update, context, zip_path, user_id, status_msg, zip_base)
         else:
-            await process_passkey_login(update, context, zip_path, user_id, status_msg)
+            await process_passkey_login(update, context, zip_path, user_id, status_msg, zip_base)
         try:
             os.remove(zip_path)
         except:
@@ -600,7 +602,7 @@ async def handle_passkey_document(update, context, user_id):
         except:
             pass
 
-async def process_passkey_create(update, context, zip_path, user_id, status_msg):
+async def process_passkey_create(update, context, zip_path, user_id, status_msg, zip_base=None):
     lang = lang_from_update(update)
     api_id = int(os.getenv("TELEGRAM_APP_ID", "2040"))
     api_hash = os.getenv("TELEGRAM_APP_HASH", "b18441a1ff607e10a989891a5462e627")
@@ -675,7 +677,7 @@ async def process_passkey_create(update, context, zip_path, user_id, status_msg)
             session_file, json_file = item
             acc_out = os.path.join(temp_dir, f"acc_{task.completed}")
             os.makedirs(acc_out, exist_ok=True)
-            is_ok, reason = await create_single_passkey(session_file, json_file, Path(acc_out), api_id, api_hash)
+            is_ok, reason, err_label = await create_single_passkey(session_file, json_file, Path(acc_out), api_id, api_hash)
             if is_ok:
                 moved = False
                 for pf in os.listdir(acc_out):
@@ -685,9 +687,16 @@ async def process_passkey_create(update, context, zip_path, user_id, status_msg)
                 if moved:
                     return {"category": "success", "name": os.path.basename(str(session_file))}
             stem = os.path.splitext(os.path.basename(str(session_file)))[0]
-            with open(os.path.join(fail_dir, f"{stem}.txt"), 'w', encoding='utf-8') as ef:
+            label = err_label or classify_rpc_error(reason or "", stage="login")
+            files = [str(session_file)]
+            if json_file and os.path.exists(str(json_file)):
+                files.append(str(json_file))
+            label_clean = place_failed(fail_dir, label, files, subdir_name=stem)
+            tgt = os.path.join(fail_dir, label_clean, stem)
+            os.makedirs(tgt, exist_ok=True)
+            with open(os.path.join(tgt, "error.txt"), 'w', encoding='utf-8') as ef:
                 ef.write(reason or "未知错误")
-            return {"category": "fail", "name": stem, "reason": reason}
+            return {"category": "fail", "error": label, "name": stem, "reason": reason}
 
         task = BatchTask(user_id, update.effective_chat.id, accounts, module_name="passkey_create")
         wd = arm_timeout(task, int(os.getenv("TASK_TIMEOUT", "1800")))
@@ -717,10 +726,11 @@ async def process_passkey_create(update, context, zip_path, user_id, status_msg)
             os.getenv("ADMIN_ID", "").split(","),
             lang,
             result_text_fn=result_text,
-            pending_dir=pending_dir
+            pending_dir=pending_dir,
+            zip_base=zip_base or f"passkey_create_{user_id}"
         )
 
-async def process_passkey_login(update, context, zip_path, user_id, status_msg):
+async def process_passkey_login(update, context, zip_path, user_id, status_msg, zip_base=None):
     lang = lang_from_update(update)
     api_id = int(os.getenv("TELEGRAM_APP_ID", "2040"))
     api_hash = os.getenv("TELEGRAM_APP_HASH", "b18441a1ff607e10a989891a5462e627")
@@ -758,7 +768,7 @@ async def process_passkey_login(update, context, zip_path, user_id, status_msg):
             pk_file = item
             acc_out = os.path.join(temp_dir, f"login_{task.completed}")
             os.makedirs(acc_out, exist_ok=True)
-            is_ok, reason = await login_single_passkey(pk_file, Path(acc_out), api_id, api_hash)
+            is_ok, reason, err_label = await login_single_passkey(pk_file, Path(acc_out), api_id, api_hash)
             if is_ok:
                 moved = False
                 for pf in os.listdir(acc_out):
@@ -771,9 +781,13 @@ async def process_passkey_login(update, context, zip_path, user_id, status_msg):
                 if moved:
                     return {"category": "success", "name": os.path.basename(str(pk_file))}
             stem = os.path.splitext(os.path.basename(str(pk_file)))[0]
-            with open(os.path.join(fail_dir, f"{stem}.txt"), 'w', encoding='utf-8') as ef:
+            label = err_label or classify_rpc_error(reason or "", stage="login")
+            label_clean = place_failed(fail_dir, label, [str(pk_file)], subdir_name=stem)
+            tgt = os.path.join(fail_dir, label_clean, stem)
+            os.makedirs(tgt, exist_ok=True)
+            with open(os.path.join(tgt, "error.txt"), 'w', encoding='utf-8') as ef:
                 ef.write(reason or "未知错误")
-            return {"category": "fail", "name": stem, "reason": reason}
+            return {"category": "fail", "error": label, "name": stem, "reason": reason}
 
         task = BatchTask(user_id, update.effective_chat.id, passkey_files, module_name="passkey_login")
         wd = arm_timeout(task, int(os.getenv("TASK_TIMEOUT", "1800")))
@@ -801,5 +815,6 @@ async def process_passkey_login(update, context, zip_path, user_id, status_msg):
             os.getenv("ADMIN_ID", "").split(","),
             lang,
             result_text_fn=result_text,
-            pending_dir=pending_dir
+            pending_dir=pending_dir,
+            zip_base=zip_base or f"passkey_login_{user_id}"
         )

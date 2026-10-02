@@ -183,8 +183,12 @@ async def message_queue_processor(user_id: str):
                         break
                     continue
             except asyncio.CancelledError:
-                logger.info(f"用户 {user_id} 的队列处理器被取消")
-                break
+                current = asyncio.current_task()
+                if current is not None and current.cancelling() > 0:
+                    logger.info(f"用户 {user_id} 的队列处理器被取消")
+                    break
+                logger.warning(f"用户 {user_id} 被内部取消异常打断，已忽略并继续")
+                continue
             except Exception as e:
                 logger.error(f"队列处理器未知错误 {user_id}: {e}", exc_info=True)
                 continue

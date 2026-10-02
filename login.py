@@ -13,8 +13,9 @@ from io import BytesIO
 from datetime import datetime
 from opentele.tl import TelegramClient
 from opentele.api import API, UseCurrentSession
-from telethon.errors import SessionPasswordNeededError, AuthRestartError, FloodWaitError
+from telethon.errors import SessionPasswordNeededError, AuthRestartError, FloodWaitError, RPCError
 from dotenv import load_dotenv
+from task_engine import classify_rpc_error
 
 load_dotenv()
 ACCOUNT_LOGIN_BACK = os.getenv("ACCOUNT_LOGIN_BACK")
@@ -127,7 +128,20 @@ class LoginHandler:
         await self.client.connect()
         try:
             if not await self.client.is_user_authorized():
-                await self.client.send_code_request(phone)
+                try:
+                    await self.client.send_code_request(phone)
+                except RPCError as e:
+                    label = classify_rpc_error(e, stage="sendcode")
+                    await update.message.reply_text(
+                        f"<tg-emoji emoji-id='5778527486270770928'>❌</tg-emoji> 发送验证码错误（{label}）: {str(e)[:100]}",
+                        parse_mode='HTML'
+                    )
+                    try:
+                        await self.client.disconnect()
+                    except Exception:
+                        pass
+                    self.client = None
+                    return
                 await update.message.reply_text(
                     "<tg-emoji emoji-id='5877316724830768997'>📤</tg-emoji> " + tr("login.code_sent", lang_from_update(update)),
                     parse_mode='HTML'

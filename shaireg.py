@@ -14,6 +14,7 @@ import aiohttp.client_exceptions
 
 logger = logging.getLogger(__name__)
 from i18n import tr, lang_from_update
+from task_engine import sanitize_filename_part, send_task_end
 
 MAX_EXTRACT_SIZE = 200 * 1024 * 1024
 CONCURRENT_REQUESTS = 3
@@ -109,7 +110,8 @@ async def handle_regtime_document(update, context, user_id, back_markup):
             parse_mode='HTML'
         )
 
-        result_text, result_zip = await process_regtime(zip_path, update, context)
+        zip_base = os.path.splitext(document.file_name)[0]
+        result_text, result_zip = await process_regtime(zip_path, update, context, zip_base=zip_base)
 
         await context.bot.send_message(
             chat_id=update.effective_chat.id,
@@ -128,6 +130,8 @@ async def handle_regtime_document(update, context, user_id, back_markup):
                 )
             os.remove(result_zip)
 
+        await send_task_end(context, update.effective_chat.id)
+
         os.remove(zip_path)
 
     except Exception as e:
@@ -140,7 +144,7 @@ async def handle_regtime_document(update, context, user_id, back_markup):
     finally:
         await status_msg.delete()
 
-async def process_regtime(zip_path, update, context):
+async def process_regtime(zip_path, update, context, zip_base=None):
     temp_dir = tempfile.mkdtemp(prefix="regtime_")
     try:
         extract_dir = os.path.join(temp_dir, "extracted")
@@ -267,11 +271,12 @@ async def process_regtime(zip_path, update, context):
                     arcname = os.path.relpath(file_path, output_dir)
                     zf.write(file_path, arcname)
 
-        final_zip = os.path.join("downloads", f"regtime_result_{int(time.time())}.zip")
+        total = len(account_infos)
+        packed = sum(len(phones) for phones in date_map.values())
+        final_zip = os.path.join("downloads", f"{sanitize_filename_part(zip_base or 'regtime')}_{packed}_成功.zip")
         shutil.move(result_zip, final_zip)
         result_zip = final_zip
 
-        total = len(account_infos)
         lang = lang_from_update(update)
         result_text = f"""<tg-emoji emoji-id="5920052658743283381">✅</tg-emoji> <b>{tr('regtime.done', lang)}</b>
 

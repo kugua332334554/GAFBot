@@ -19,7 +19,9 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.constants import ParseMode
 from telegram.ext import ContextTypes
 from i18n import tr, lang_from_update, get_env_i18n
-from task_engine import BatchTask, run_batch, arm_timeout, pack_and_send
+from task_engine import (BatchTask, run_batch, arm_timeout, pack_and_send,
+                         classify_rpc_error, place_failed,
+                         ERR_UNKNOWN, ERR_DEAD, ERR_2FA_RESET_FAIL)
 
 logger = logging.getLogger(__name__)
 from dotenv import load_dotenv
@@ -582,6 +584,7 @@ async def check_session_privacy(session_file, json_file, api_id, api_hash, priva
         "session": os.path.basename(session_file),
         "status": "unknown",
         "message": "",
+        "error_label": ERR_UNKNOWN,
         "json_path": None,
         "tdata_dir": tdata_dir
     }
@@ -686,6 +689,7 @@ async def check_session_privacy(session_file, json_file, api_id, api_hash, priva
         if not await asyncio.wait_for(client.is_user_authorized(), timeout=10):
             result["status"] = "failed"
             result["message"] = "session无效"
+            result["error_label"] = ERR_DEAD
             return result
         log_time(f"授权检查耗时: {time.time() - auth_start:.2f}秒")
         
@@ -694,6 +698,7 @@ async def check_session_privacy(session_file, json_file, api_id, api_hash, priva
         if not me:
             result["status"] = "failed"
             result["message"] = "无法获取用户信息"
+            result["error_label"] = ERR_DEAD
             return result
         log_time(f"获取用户信息耗时: {time.time() - me_start:.2f}秒")
         
@@ -721,15 +726,19 @@ async def check_session_privacy(session_file, json_file, api_id, api_hash, priva
     except SessionPasswordNeededError:
         result["status"] = "failed"
         result["message"] = "需要2FA验证"
+        result["error_label"] = ERR_2FA_RESET_FAIL
     except FloodWaitError as e:
         result["status"] = "failed"
         result["message"] = f"等待{e.seconds}秒"
+        result["error_label"] = classify_rpc_error(e)
     except asyncio.TimeoutError:
         result["status"] = "failed"
         result["message"] = "网络操作超时"
+        result["error_label"] = ERR_UNKNOWN
     except Exception as e:
         result["status"] = "failed"
         result["message"] = f"错误: {str(e)[:30]}"
+        result["error_label"] = classify_rpc_error(e)
     finally:
         if client:
             disconnect_start = time.time()
@@ -750,7 +759,7 @@ def get_total_size(path):
                 total += os.path.getsize(fp)
     return total
 
-async def process_privacy(update, context, zip_path, user_id, privacy_settings_data):
+async def process_privacy(update, context, zip_path, user_id, privacy_settings_data, zip_base=None):
     lang = lang_from_update(update)
     api_id_str = os.getenv("TELEGRAM_APP_ID")
     api_hash = os.getenv("TELEGRAM_APP_HASH")
@@ -782,10 +791,11 @@ async def process_privacy(update, context, zip_path, user_id, privacy_settings_d
         )
         return
 
-    await _process_privacy_internal(update, context, zip_path, user_id, api_id, api_hash, admins, privacy_settings_data)
+    await _process_privacy_internal(update, context, zip_path, user_id, api_id, api_hash, admins, privacy_settings_data, zip_base)
 async def handle_privacy_document(update: Update, context: ContextTypes.DEFAULT_TYPE, user_id: str):
     lang = lang_from_update(update)
     document = update.message.document
+    zip_base = os.path.splitext(document.file_name or "")[0]
 
     if not document.file_name.endswith('.zip'):
         keyboard = [[create_back_button(lang)]]
@@ -827,7 +837,7 @@ async def handle_privacy_document(update: Update, context: ContextTypes.DEFAULT_
             parse_mode='HTML'
         )
 
-        await process_privacy(update, context, zip_path, user_id, privacy_settings_data)
+        await process_privacy(update, context, zip_path, user_id, privacy_settings_data, zip_base)
 
         try:
             os.remove(zip_path)
@@ -851,7 +861,7 @@ async def handle_privacy_document(update: Update, context: ContextTypes.DEFAULT_
         except:
             pass
 
-async def _process_privacy_internal(update, context, zip_path, user_id, api_id, api_hash, admins, privacy_settings_data):
+async def _process_privacy_internal(update, context, zip_path, user_id, api_id, api_hash, admins, privacy_settings_data, zip_base=None):
     lang = lang_from_update(update)
     with tempfile.TemporaryDirectory() as temp_dir:
         extract_dir = os.path.join(temp_dir, "extracted")
@@ -935,10 +945,16 @@ async def _process_privacy_internal(update, context, zip_path, user_id, api_id, 
                     logger.error(f"转换失败 {tdata_dir}: {err}")
 
                 if i % 3 == 0 or i == len(tdata_dirs):
-                        t._progress_text = f"""<tg-emoji emoji-id="5839200986022812209">🔄</tg-emoji> <b>{tr('shaihuo.convert_progress', lang)}</b>
+                    try:
+                        await status_msg.edit_text(
+                            text=f"""<tg-emoji emoji-id="5839200986022812209">🔄</tg-emoji> <b>{tr('shaihuo.convert_progress', lang)}</b>
 
 {tr('shaihuo.progress', lang)}: {i}/{len(tdata_dirs)}
-{tr('shaihuo.success', lang)}: {len(accounts)}"""
+{tr('shaihuo.success', lang)}: {len(accounts)}""",
+                            parse_mode='HTML'
+                        )
+                    except:
+                        pass
                 await asyncio.sleep(0.2)
 
             try:
@@ -967,7 +983,11 @@ async def _process_privacy_internal(update, context, zip_path, user_id, api_id, 
             parse_mode='HTML'
         )
         
+        success_dir = os.path.join(temp_dir, "success")
+        failed_dir = os.path.join(temp_dir, "failed")
         pending_dir = os.path.join(temp_dir, "pending")
+        os.makedirs(success_dir, exist_ok=True)
+        os.makedirs(failed_dir, exist_ok=True)
         os.makedirs(pending_dir, exist_ok=True)
 
         async def process_one(item, task):
@@ -975,21 +995,29 @@ async def _process_privacy_internal(update, context, zip_path, user_id, api_id, 
             result = await check_session_privacy(
                 session_file, json_file, api_id, api_hash, privacy_settings_data, tdata_dir
             )
-            category = "success" if result["status"] == "success" else "fail"
-            target_dir = success_dir if category == "success" else failed_dir
-            account_folder = os.path.join(target_dir, phone)
-            os.makedirs(account_folder, exist_ok=True)
-            if tdata_dir and os.path.exists(tdata_dir):
-                shutil.copytree(tdata_dir, os.path.join(account_folder, "tdata"), dirs_exist_ok=True)
-            if session_file and os.path.exists(session_file):
-                shutil.copy2(session_file, os.path.join(account_folder, os.path.basename(session_file)))
             json_path_to_copy = result.get("json_path") or json_file
-            if json_path_to_copy and os.path.exists(json_path_to_copy):
-                try:
-                    shutil.copy2(json_path_to_copy, os.path.join(account_folder, os.path.basename(json_path_to_copy)))
-                except:
-                    pass
-            return {"category": category, "name": phone}
+            if result["status"] == "success":
+                account_folder = os.path.join(success_dir, phone)
+                os.makedirs(account_folder, exist_ok=True)
+                if tdata_dir and os.path.exists(tdata_dir):
+                    shutil.copytree(tdata_dir, os.path.join(account_folder, "tdata"), dirs_exist_ok=True)
+                if session_file and os.path.exists(session_file):
+                    shutil.copy2(session_file, os.path.join(account_folder, os.path.basename(session_file)))
+                if json_path_to_copy and os.path.exists(json_path_to_copy):
+                    try:
+                        shutil.copy2(json_path_to_copy, os.path.join(account_folder, os.path.basename(json_path_to_copy)))
+                    except:
+                        pass
+                return {"category": "success", "name": phone}
+            label = result.get("error_label") or ERR_UNKNOWN
+            sf = place_failed(failed_dir, label,
+                              [x for x in [session_file, json_path_to_copy] if x],
+                              subdir_name=phone)
+            if tdata_dir and os.path.exists(tdata_dir):
+                fail_folder = os.path.join(failed_dir, sf, phone)
+                os.makedirs(fail_folder, exist_ok=True)
+                shutil.copytree(tdata_dir, os.path.join(fail_folder, "tdata"), dirs_exist_ok=True)
+            return {"category": "fail", "error": label, "name": phone}
 
         task = BatchTask(user_id, update.effective_chat.id, accounts, "privacy")
         watchdog = arm_timeout(task, MAX_TASK_TIME)
@@ -1048,7 +1076,8 @@ async def _process_privacy_internal(update, context, zip_path, user_id, api_id, 
                 "success": (success_dir, f"privacy_success_{datetime.now().strftime('%Y%m%d_%H%M%S')}.zip", lambda n: f"<b><tg-emoji emoji-id='5920052658743283381'>✅</tg-emoji> {tr('privacy.success_caption', lang)} ({n})</b>"),
                 "fail": (failed_dir, f"privacy_failed_{datetime.now().strftime('%Y%m%d_%H%M%S')}.zip", lambda n: f"<b><tg-emoji emoji-id='5922712343011135025'>❌</tg-emoji> {tr('privacy.failed_caption', lang)} ({n})</b>"),
             },
-            admins=admins, lang=lang, result_text_fn=result_text_fn, pending_dir=pending_dir
+            admins=admins, lang=lang, result_text_fn=result_text_fn, pending_dir=pending_dir,
+            zip_base=zip_base or f"privacy_{user_id}"
         )
 
         try:

@@ -7,6 +7,7 @@ import time
 import random
 import json
 import sqlite3
+from collections import Counter
 from datetime import datetime, timedelta, timezone
 import logging
 from telegram import InlineKeyboardMarkup
@@ -17,7 +18,9 @@ from opentele.td import TDesktop
 from telethon.errors import SessionPasswordNeededError, FloodWaitError
 from telethon.tl.functions.help import GetAppConfigRequest
 from i18n import tr, lang_from_update
-from task_engine import BatchTask, run_batch, arm_timeout
+from task_engine import (BatchTask, run_batch, arm_timeout,
+                         classify_rpc_error, place_failed, sanitize_filename_part,
+                         send_task_end, zip_dir, ERR_UNKNOWN, ERR_DEAD)
 
 logger = logging.getLogger(__name__)
 
@@ -313,11 +316,11 @@ async def check_session_alive(session_file, json_file, api_id, api_hash):
                         continue
                     else:
                         logger.error(f"自动修复失败，无法使用该 session: {use_session}")
-                        return 'dead', f"Session文件损坏且修复失败", final_json_file, None
+                        return 'dead', f"Session文件损坏且修复失败", final_json_file, None, ERR_UNKNOWN
                 else:
-                    return 'dead', f"创建客户端失败: {err_msg[:30]}", final_json_file, None
+                    return 'dead', f"创建客户端失败: {err_msg[:30]}", final_json_file, None, ERR_UNKNOWN
             except Exception as ex:
-                return 'dead', f"创建客户端异常: {str(ex)[:30]}", final_json_file, None
+                return 'dead', f"创建客户端异常: {str(ex)[:30]}", final_json_file, None, ERR_UNKNOWN
 
         # 连接
         connect_start = time.time()
@@ -327,14 +330,14 @@ async def check_session_alive(session_file, json_file, api_id, api_hash):
         # 授权检查
         auth_start = time.time()
         if not await asyncio.wait_for(client.is_user_authorized(), timeout=10):
-            return 'dead', "未授权", final_json_file, None
+            return 'dead', "未授权", final_json_file, None, ERR_DEAD
         log_time(f"授权检查耗时: {time.time() - auth_start:.2f}秒")
 
         # 获取本人信息
         me_start = time.time()
         me = await asyncio.wait_for(client.get_me(), timeout=10)
         if not me:
-            return 'dead', "无法获取用户信息", final_json_file, None
+            return 'dead', "无法获取用户信息", final_json_file, None, ERR_DEAD
         log_time(f"获取用户信息耗时: {time.time() - me_start:.2f}秒")
 
         if not final_json_file:
@@ -346,6 +349,7 @@ async def check_session_alive(session_file, json_file, api_id, api_hash):
 
         # 获取冻结配置
         config_start = time.time()
+        dead_label = None
         try:
             app_config = await asyncio.wait_for(client(GetAppConfigRequest(hash=0)), timeout=10)
             config_json = json.loads(app_config.to_json())
@@ -379,28 +383,30 @@ async def check_session_alive(session_file, json_file, api_id, api_hash):
             status = 'dead'
             reason = "配置获取超时"
             freeze_info = None
+            dead_label = ERR_UNKNOWN
         except Exception as e:
             logger.error(f"获取 AppConfig 失败: {e}")
             status = 'dead'
             reason = f"配置获取错误: {str(e)[:20]}"
             freeze_info = None
+            dead_label = classify_rpc_error(e)
 
         total_time = time.time() - start_time
         log_time(f"账号 {os.path.basename(session_file)} 检查完成，状态={status}，总耗时={total_time:.2f}秒")
-        return status, reason, final_json_file, freeze_info
+        return status, reason, final_json_file, freeze_info, dead_label or (ERR_UNKNOWN if status == 'dead' else None)
 
     except asyncio.TimeoutError:
         log_time(f"账号 {os.path.basename(session_file)} 网络操作超时")
-        return 'dead', "网络超时", final_json_file, None
-    except SessionPasswordNeededError:
+        return 'dead', "网络超时", final_json_file, None, ERR_UNKNOWN
+    except SessionPasswordNeededError as e:
         log_time(f"账号 {os.path.basename(session_file)} 需要2FA")
-        return 'dead', "2FA验证", final_json_file, None
+        return 'dead', "2FA验证", final_json_file, None, classify_rpc_error(e)
     except FloodWaitError as e:
         log_time(f"账号 {os.path.basename(session_file)} Flood等待{e.seconds}秒")
-        return 'dead', f"等待{e.seconds}秒", final_json_file, None
+        return 'dead', f"等待{e.seconds}秒", final_json_file, None, classify_rpc_error(e)
     except Exception as e:
         log_time(f"账号 {os.path.basename(session_file)} 异常: {str(e)[:50]}")
-        return 'dead', f"错误:{str(e)[:20]}", final_json_file, None
+        return 'dead', f"错误:{str(e)[:20]}", final_json_file, None, classify_rpc_error(e)
     finally:
         if client:
             disconnect_start = time.time()
@@ -577,7 +583,8 @@ async def handle_shaihuo_document(update, context, user_id, user_states):
             f"<tg-emoji emoji-id='5942826671290715541'>🔍</tg-emoji> {tr('shaihuo.processing', lang)}",
             parse_mode='HTML'
         )
-        await process_shaihuo(update, context, zip_path, user_id)
+        await process_shaihuo(update, context, zip_path, user_id,
+                              base=os.path.splitext(document.file_name or "")[0] or None)
         try:
             os.remove(zip_path)
         except:
@@ -599,7 +606,7 @@ async def handle_shaihuo_document(update, context, user_id, user_states):
         except:
             pass
 
-async def process_shaihuo(update, context, zip_path, user_id):
+async def process_shaihuo(update, context, zip_path, user_id, base=None):
     from telegram import InlineKeyboardMarkup
     from bot import create_back_button
     lang = lang_from_update(update)
@@ -632,9 +639,9 @@ async def process_shaihuo(update, context, zip_path, user_id):
         )
         return
 
-    await _process_shaihuo_internal(update, context, zip_path, user_id, api_id, api_hash, admins)
+    await _process_shaihuo_internal(update, context, zip_path, user_id, api_id, api_hash, admins, base)
 
-async def _process_shaihuo_internal(update, context, zip_path, user_id, api_id, api_hash, admins):
+async def _process_shaihuo_internal(update, context, zip_path, user_id, api_id, api_hash, admins, base=None):
     from telegram import InlineKeyboardMarkup
     from bot import create_back_button
     lang = lang_from_update(update)
@@ -774,7 +781,7 @@ async def _process_shaihuo_internal(update, context, zip_path, user_id, api_id, 
         async def process_one(item, task):
             phone, session_file, json_file, tdata_dir = item
             account_start = time.time()
-            status, reason, final_json_file, freeze_info = await check_session_alive(
+            status, reason, final_json_file, freeze_info, dead_label = await check_session_alive(
                 session_file, json_file, api_id, api_hash
             )
             log_time(f"账号 {phone} 处理完成，状态={status}，耗时={time.time()-account_start:.2f}秒")
@@ -784,7 +791,12 @@ async def _process_shaihuo_internal(update, context, zip_path, user_id, api_id, 
             elif status == 'frozen':
                 target_dir = os.path.join(frozen_dir, phone)
             else:
-                target_dir = os.path.join(dead_dir, phone)
+                status = 'dead'
+                label = dead_label or ERR_DEAD
+                sub = place_failed(dead_dir, label, [session_file, final_json_file], subdir_name=phone)
+                if tdata_dir and os.path.exists(tdata_dir):
+                    shutil.copytree(tdata_dir, os.path.join(dead_dir, sub, phone, "tdata"), dirs_exist_ok=True)
+                return {"category": "dead", "error": label, "phone": phone}
 
             os.makedirs(target_dir, exist_ok=True)
             if tdata_dir and os.path.exists(tdata_dir):
@@ -797,7 +809,7 @@ async def _process_shaihuo_internal(update, context, zip_path, user_id, api_id, 
                 with open(os.path.join(target_dir, "frozen.txt"), 'w', encoding='utf-8') as f:
                     f.write(f"冻结开始时间: {freeze_info['since']}\n")
                     f.write(f"冻结结束时间: {freeze_info['until']}\n")
-            return {"category": status if status in ('alive', 'frozen', 'dead') else 'dead', "phone": phone}
+            return {"category": status, "phone": phone}
 
         task = BatchTask(user_id, update.effective_chat.id, accounts, "shaihuo")
         watchdog = arm_timeout(task, MAX_TASK_TIME)
@@ -831,25 +843,32 @@ async def _process_shaihuo_internal(update, context, zip_path, user_id, api_id, 
         alive_count, frozen_count, dead_count = cats['alive'], cats['frozen'], cats['dead']
         pending_count = len(task.remaining_pending())
 
-        def zip_dir(src, dst):
-            with zipfile.ZipFile(dst, 'w') as zipf:
-                for root, dirs, files in os.walk(src):
-                    for file in files:
-                        file_path = os.path.join(root, file)
-                        zipf.write(file_path, os.path.relpath(file_path, src))
+        zip_base = sanitize_filename_part(base) if base else f"shaihuo_{user_id}"
 
         alive_zip = os.path.join(temp_dir, "alive.zip")
-        if alive_count > 0:
-            zip_dir(alive_dir, alive_zip)
         frozen_zip = os.path.join(temp_dir, "frozen.zip")
-        if frozen_count > 0:
-            zip_dir(frozen_dir, frozen_zip)
-        dead_zip = os.path.join(temp_dir, "dead.zip")
-        if dead_count > 0:
-            zip_dir(dead_dir, dead_zip)
+
+        # dead 按失败原因子目录拆包
+        dead_label_counts = Counter()
+        for r in task.done:
+            if r.get("category") == "dead":
+                dead_label_counts[sanitize_filename_part(r.get("error") or ERR_DEAD)] += 1
+        dead_loose = [f for f in os.listdir(dead_dir) if not os.path.isdir(os.path.join(dead_dir, f))]
+        if dead_loose:
+            loose_dir = os.path.join(dead_dir, ERR_UNKNOWN)
+            os.makedirs(loose_dir, exist_ok=True)
+            for f in dead_loose:
+                shutil.move(os.path.join(dead_dir, f), os.path.join(loose_dir, f))
+        dead_zips = []
+        dead_labels = sorted(d for d in os.listdir(dead_dir) if os.path.isdir(os.path.join(dead_dir, d)) and os.listdir(os.path.join(dead_dir, d)))
+        for idx, label in enumerate(dead_labels):
+            zpath = os.path.join(temp_dir, f"dead_{idx}.zip")
+            if zip_dir(os.path.join(dead_dir, label), zpath):
+                n = dead_label_counts.get(label) or len(os.listdir(os.path.join(dead_dir, label)))
+                dead_zips.append((zpath, f"{zip_base}_{n}_失败_{label}.zip",
+                                  f"<b><tg-emoji emoji-id='5922712343011135025'>❌</tg-emoji> {tr('shaihuo.dead_caption', lang)} ({n})</b>"))
+
         pending_zip = os.path.join(temp_dir, "pending.zip")
-        if pending_count > 0:
-            zip_dir(pending_dir, pending_zip)
 
         stop_tag = " (已终止)" if task.stopped else ""
 
@@ -874,13 +893,12 @@ async def _process_shaihuo_internal(update, context, zip_path, user_id, api_id, 
         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
 
         zips_to_send = []
-        if alive_count > 0:
-            zips_to_send.append((alive_zip, f"alive_{timestamp}.zip", f"<b><tg-emoji emoji-id='5920052658743283381'>✅</tg-emoji> {tr('shaihuo.alive_caption', lang)} ({alive_count})</b>"))
-        if frozen_count > 0:
-            zips_to_send.append((frozen_zip, f"frozen_{timestamp}.zip", f"<b><tg-emoji emoji-id='5985347654974967782'>❄️</tg-emoji> {tr('shaihuo.frozen_caption', lang)} ({frozen_count})</b>"))
-        if dead_count > 0:
-            zips_to_send.append((dead_zip, f"dead_{timestamp}.zip", f"<b><tg-emoji emoji-id='5922712343011135025'>❌</tg-emoji> {tr('shaihuo.dead_caption', lang)} ({dead_count})</b>"))
-        if pending_count > 0:
+        if alive_count > 0 and zip_dir(alive_dir, alive_zip):
+            zips_to_send.append((alive_zip, f"{zip_base}_{alive_count}_成功.zip", f"<b><tg-emoji emoji-id='5920052658743283381'>✅</tg-emoji> {tr('shaihuo.alive_caption', lang)} ({alive_count})</b>"))
+        if frozen_count > 0 and zip_dir(frozen_dir, frozen_zip):
+            zips_to_send.append((frozen_zip, f"{zip_base}_{frozen_count}_失败_已冻结.zip", f"<b><tg-emoji emoji-id='5985347654974967782'>❄️</tg-emoji> {tr('shaihuo.frozen_caption', lang)} ({frozen_count})</b>"))
+        zips_to_send.extend(dead_zips)
+        if pending_count > 0 and zip_dir(pending_dir, pending_zip):
             zips_to_send.append((pending_zip, f"pending_{timestamp}.zip", f"<b><tg-emoji emoji-id='5846008814129649022'>⏸️</tg-emoji> {tr('shaihuo.pending_caption', lang)} ({pending_count})</b>"))
 
         for zpath, fname, cap in zips_to_send:
@@ -914,15 +932,13 @@ async def _process_shaihuo_internal(update, context, zip_path, user_id, api_id, 
                     parse_mode='HTML'
                 )
 
-                admin_timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-
                 for zpath, fname, cap in zips_to_send:
                     try:
                         with open(zpath, 'rb') as f:
                             await context.bot.send_document(
                                 chat_id=admin_id,
                                 document=f,
-                                filename=fname.replace(timestamp, admin_timestamp),
+                                filename=fname,
                                 caption=cap,
                                 parse_mode='HTML'
                             )
@@ -930,5 +946,7 @@ async def _process_shaihuo_internal(update, context, zip_path, user_id, api_id, 
                         logger.error(f"发给管理员zip失败 {fname}: {e}")
             except Exception as e:
                 logger.error(f"发送给管理员 {admin_id} 失败: {e}")
+
+        await send_task_end(context, update.effective_chat.id)
 
         log_time(f"筛活任务结束，总账号数={total_accounts}，存活={alive_count}，冻结={frozen_count}，失效={dead_count}，未完成={pending_count}，提前终止={task.stopped}")

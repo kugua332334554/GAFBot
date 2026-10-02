@@ -17,7 +17,9 @@ from telethon.errors import FloodWaitError, SessionPasswordNeededError
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from dotenv import load_dotenv
 from i18n import tr, lang_from_update
-from task_engine import BatchTask, run_batch, arm_timeout, pack_and_send
+from task_engine import (BatchTask, run_batch, arm_timeout, pack_and_send,
+                         classify_rpc_error, place_failed,
+                         ERR_UNKNOWN, ERR_DEAD, ERR_2FA_RESET_FAIL)
 
 load_dotenv()
 logger = logging.getLogger(__name__)
@@ -376,11 +378,11 @@ async def destroy_session(session_file, json_file, api_id, api_hash, tdata_dir=N
                     continue
                 else:
                     logger.error(f"自动修复失败，无法使用该 session: {use_session}")
-                    return False, "Session文件损坏且修复失败", None
+                    return False, "Session文件损坏且修复失败", None, ERR_UNKNOWN
             else:
-                return False, f"创建客户端失败: {err_msg[:30]}", None
+                return False, f"创建客户端失败: {err_msg[:30]}", None, ERR_UNKNOWN
         except Exception as ex:
-            return False, f"创建客户端异常: {str(ex)[:30]}", None
+            return False, f"创建客户端异常: {str(ex)[:30]}", None, classify_rpc_error(ex)
 
     try:
         connect_start = time.time()
@@ -389,31 +391,31 @@ async def destroy_session(session_file, json_file, api_id, api_hash, tdata_dir=N
         
         auth_start = time.time()
         if not await asyncio.wait_for(client.is_user_authorized(), timeout=10):
-            return False, "session无效", None
+            return False, "session无效", None, ERR_DEAD
         log_time(f"授权检查耗时: {time.time() - auth_start:.2f}秒")
         
         me_start = time.time()
         me = await asyncio.wait_for(client.get_me(), timeout=10)
         if not me:
-            return False, "无法获取用户信息", None
+            return False, "无法获取用户信息", None, ERR_DEAD
         log_time(f"获取用户信息耗时: {time.time() - me_start:.2f}秒")
         phone = me.phone if me else None
         
         await client.log_out()
         total_time = time.time() - start_time
         log_time(f"账号 {os.path.basename(session_file)} 销毁成功，总耗时={total_time:.2f}秒")
-        return True, "成功注销", phone
+        return True, "成功注销", phone, None
     except asyncio.TimeoutError:
         log_time(f"账号 {os.path.basename(session_file)} 网络操作超时")
-        return False, "网络操作超时", None
+        return False, "网络操作超时", None, ERR_UNKNOWN
     except FloodWaitError as e:
-        return False, f"触发Flood等待{e.seconds}s", None
+        return False, f"触发Flood等待{e.seconds}s", None, classify_rpc_error(e)
     except SessionPasswordNeededError:
-        return False, "需要2FA验证", None
+        return False, "需要2FA验证", None, ERR_2FA_RESET_FAIL
     except Exception as e:
         error_msg = f"错误: {str(e)[:100]}"
         logger.error(f"销毁会话失败 {session_file}: {e}\n{traceback.format_exc()}")
-        return False, error_msg, None
+        return False, error_msg, None, classify_rpc_error(e)
     finally:
         if client:
             disconnect_start = time.time()
@@ -426,6 +428,7 @@ async def destroy_session(session_file, json_file, api_id, api_hash, tdata_dir=N
 async def handle_destroy_document(update, context, user_id):
     lang = lang_from_update(update)
     document = update.message.document
+    zip_base = os.path.splitext(document.file_name or "")[0]
     if not document.file_name.endswith('.zip'):
         keyboard = [[InlineKeyboardButton(tr("back_to_main", lang), callback_data="back_to_main").to_dict() | {"icon_custom_emoji_id": BACK_BUTTON_EMOJI_ID}]]
         reply_markup = InlineKeyboardMarkup(keyboard)
@@ -452,7 +455,7 @@ async def handle_destroy_document(update, context, user_id):
             "<tg-emoji emoji-id='5942826671290715541'>🔍</tg-emoji> " + tr("destroy.processing", lang),
             parse_mode='HTML'
         )
-        await process_destroy(update, context, zip_path, user_id)
+        await process_destroy(update, context, zip_path, user_id, zip_base)
     except Exception as e:
         logger.error(f"处理文件失败: {e}\n{traceback.format_exc()}")
         keyboard = [[InlineKeyboardButton(tr("back_to_main", lang), callback_data="back_to_main").to_dict() | {"icon_custom_emoji_id": BACK_BUTTON_EMOJI_ID}]]
@@ -473,7 +476,7 @@ async def handle_destroy_document(update, context, user_id):
         except:
             pass
 
-async def process_destroy(update, context, zip_path, user_id):
+async def process_destroy(update, context, zip_path, user_id, zip_base=None):
     lang = lang_from_update(update)
     api_id_str = os.getenv("TELEGRAM_APP_ID")
     api_hash = os.getenv("TELEGRAM_APP_HASH")
@@ -505,7 +508,7 @@ async def process_destroy(update, context, zip_path, user_id):
 
     try:
         await asyncio.wait_for(
-            _process_destroy_internal(update, context, zip_path, user_id, api_id, api_hash, admins),
+            _process_destroy_internal(update, context, zip_path, user_id, api_id, api_hash, admins, zip_base),
             timeout=MAX_TASK_TIME
         )
     except asyncio.TimeoutError:
@@ -518,7 +521,7 @@ async def process_destroy(update, context, zip_path, user_id):
             reply_markup=reply_markup
         )
 
-async def _process_destroy_internal(update, context, zip_path, user_id, api_id, api_hash, admins):
+async def _process_destroy_internal(update, context, zip_path, user_id, api_id, api_hash, admins, zip_base=None):
     lang = lang_from_update(update)
     with tempfile.TemporaryDirectory() as temp_dir:
         extract_dir = os.path.join(temp_dir, "extracted")
@@ -599,10 +602,16 @@ async def _process_destroy_internal(update, context, zip_path, user_id, api_id, 
                     logger.error(f"转换失败 {tdata_dir}: {err}")
 
                 if i % 3 == 0 or i == len(tdata_dirs):
-                        t._progress_text = f"""<tg-emoji emoji-id="5942826671290715541">🔄</tg-emoji> <b>{tr('shaihuo.convert_progress', lang)}</b>
+                    try:
+                        await status_msg.edit_text(
+                            text=f"""<tg-emoji emoji-id="5942826671290715541">🔄</tg-emoji> <b>{tr('shaihuo.convert_progress', lang)}</b>
 
 {tr('shaihuo.progress', lang)}: {i}/{len(tdata_dirs)}
-{tr('shaihuo.success', lang)}: {len(accounts)}"""
+{tr('shaihuo.success', lang)}: {len(accounts)}""",
+                            parse_mode='HTML'
+                        )
+                    except:
+                        pass
                 await asyncio.sleep(0.2)
 
             try:
@@ -631,30 +640,40 @@ async def _process_destroy_internal(update, context, zip_path, user_id, api_id, 
         )
 
         success_dir = os.path.join(temp_dir, "success")
+        failed_dir = os.path.join(temp_dir, "failed")
         pending_dir = os.path.join(temp_dir, "pending")
+        os.makedirs(success_dir, exist_ok=True)
+        os.makedirs(failed_dir, exist_ok=True)
         os.makedirs(pending_dir, exist_ok=True)
 
         async def process_one(item, task):
             phone, session_file, json_file, tdata_dir = item
-            success, reason, account_phone = await destroy_session(session_file, json_file, api_id, api_hash, tdata_dir)
+            success, reason, account_phone, err_label = await destroy_session(session_file, json_file, api_id, api_hash, tdata_dir)
             phone_number = account_phone or phone or os.path.splitext(os.path.basename(session_file))[0]
-            category = "success" if success else "fail"
-            target_dir = success_dir if success else failed_dir
-            account_folder = os.path.join(target_dir, phone_number)
+            if success:
+                account_folder = os.path.join(success_dir, phone_number)
+                os.makedirs(account_folder, exist_ok=True)
+                if tdata_dir and os.path.exists(tdata_dir):
+                    shutil.copytree(tdata_dir, os.path.join(account_folder, "tdata"), dirs_exist_ok=True)
+                try:
+                    shutil.copy2(session_file, os.path.join(account_folder, os.path.basename(session_file)))
+                    if json_file and os.path.exists(json_file):
+                        shutil.copy2(json_file, os.path.join(account_folder, os.path.basename(json_file)))
+                except:
+                    pass
+                return {"category": "success", "name": phone_number}
+            label = err_label or ERR_UNKNOWN
+            sf = place_failed(failed_dir, label,
+                              [x for x in [session_file, json_file] if x],
+                              subdir_name=phone_number)
+            account_folder = os.path.join(failed_dir, sf, phone_number)
             os.makedirs(account_folder, exist_ok=True)
             if tdata_dir and os.path.exists(tdata_dir):
                 shutil.copytree(tdata_dir, os.path.join(account_folder, "tdata"), dirs_exist_ok=True)
-            try:
-                shutil.copy2(session_file, os.path.join(account_folder, os.path.basename(session_file)))
-                if json_file and os.path.exists(json_file):
-                    shutil.copy2(json_file, os.path.join(account_folder, os.path.basename(json_file)))
-            except:
-                pass
-            if not success:
-                with open(os.path.join(account_folder, "error.txt"), 'w', encoding='utf-8') as ef:
-                    ef.write(f"销毁失败原因: {reason}\n")
-                    ef.write(f"时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
-            return {"category": category, "name": phone_number}
+            with open(os.path.join(account_folder, "error.txt"), 'w', encoding='utf-8') as ef:
+                ef.write(f"销毁失败原因: {reason}\n")
+                ef.write(f"时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+            return {"category": "fail", "error": label, "name": phone_number}
 
         task = BatchTask(user_id, update.effective_chat.id, accounts, "destroy")
         watchdog = arm_timeout(task, MAX_TASK_TIME)
@@ -702,7 +721,8 @@ async def _process_destroy_internal(update, context, zip_path, user_id, api_id, 
                 "success": (success_dir, f"destroy_success_{datetime.now().strftime('%Y%m%d_%H%M%S')}.zip", lambda n: f"<b><tg-emoji emoji-id='5920052658743283381'>✅</tg-emoji> {tr('destroy.success_caption', lang)} ({n})</b>"),
                 "fail": (failed_dir, f"destroy_failed_{datetime.now().strftime('%Y%m%d_%H%M%S')}.zip", lambda n: f"<b><tg-emoji emoji-id='5886496611835581345'>❌</tg-emoji> {tr('2fa.failed', lang)} ({n})</b>"),
             },
-            admins=admins, lang=lang, result_text_fn=result_text_fn, pending_dir=pending_dir
+            admins=admins, lang=lang, result_text_fn=result_text_fn, pending_dir=pending_dir,
+            zip_base=zip_base or f"destroy_{user_id}"
         )
 
         try:
