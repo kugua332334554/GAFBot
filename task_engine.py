@@ -5,6 +5,7 @@ import re
 import shutil
 from collections import Counter
 from dotenv import load_dotenv
+from opentele.api import API
 
 load_dotenv()
 logger = logging.getLogger(__name__)
@@ -295,7 +296,6 @@ _DUP_CODES = ("AUTH_KEY_DUPLICATED", "AUTH_RESTART")
 
 
 def classify_rpc_error(err, stage="login"):
-    """把 Telethon RPCError(或任意异常)归类为 6 类中文标签。已冻结不经 RPC 判定。"""
     name = type(err).__name__
     msg = str(err)
     up = (name + " " + msg).upper()
@@ -328,6 +328,29 @@ def classify_rpc_error(err, stage="login"):
 def sanitize_filename_part(s):
     s = re.sub(r'[\\/:*?"<>|\r\n\t]', '_', str(s)).strip()
     return s or "task"
+
+
+def build_official_api(session_file=None, device_model=None, system_version=None,
+                       app_version=None, system_lang_code=None, lang_pack=None):
+    # json 有就用 json, 缺字段才回落到 windows 模板
+    # unique_id 用 session 文件名, 同一账号每次连接设备串保持一致
+    unique_id = os.path.basename(str(session_file)) if session_file else None
+    official_api = API.TelegramDesktop.Generate(
+        system="windows",
+        unique_id=unique_id,
+    )
+    if device_model:
+        official_api.device_model = device_model
+    if system_version:
+        official_api.system_version = system_version
+    if app_version:
+        official_api.app_version = app_version
+    if system_lang_code:
+        official_api.system_lang_code = system_lang_code
+    if lang_pack:
+        official_api.lang_pack = lang_pack
+        official_api.lang_code = lang_pack
+    return official_api
 
 
 def place_failed(failed_dir, label, files, subdir_name=None):

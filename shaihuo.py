@@ -20,7 +20,7 @@ from telethon.tl.functions.help import GetAppConfigRequest
 from i18n import tr, lang_from_update
 from task_engine import (BatchTask, run_batch, arm_timeout,
                          classify_rpc_error, place_failed, sanitize_filename_part,
-                         send_task_end, zip_dir, ERR_UNKNOWN, ERR_DEAD)
+                         send_task_end, zip_dir, build_official_api, ERR_UNKNOWN, ERR_DEAD)
 
 logger = logging.getLogger(__name__)
 
@@ -261,30 +261,17 @@ async def check_session_alive(session_file, json_file, api_id, api_hash):
     lang_pack = json_config.get('lang_pack') or None
 
     try:
-        official_api = API.TelegramDesktop.Generate()
-        if device_model is None:
-            max_attempts = 100
-            attempt = 0
-            while 'linux' in official_api.device_model.lower() and attempt < max_attempts:
-                official_api = API.TelegramDesktop.Generate()
-                attempt += 1
-            if 'linux' in official_api.device_model.lower():
-                logger.warning(f"多次尝试后仍包含 Linux，强制设为 Desktop")
-                official_api.device_model = "Desktop"
+        official_api = build_official_api(
+            session_file,
+            device_model=device_model,
+            system_version=system_vision,
+            app_version=app_version,
+            system_lang_code=system_lang_code,
+            lang_pack=lang_pack,
+        )
 
         official_api.api_id = final_api_id
         official_api.api_hash = final_api_hash
-        if device_model:
-            official_api.device_model = device_model
-        if app_version:
-            official_api.app_version = app_version
-        if system_lang_code:
-            official_api.system_lang_code = system_lang_code
-        if system_vision:
-            official_api.system_version = system_vision
-        if lang_pack:
-            official_api.lang_pack = lang_pack
-            official_api.lang_code = lang_pack
 
         retry_count = 0
         while retry_count < 2:
@@ -437,16 +424,7 @@ def read_2fa_from_folder(folder_path: str):
     return None
 
 def generate_non_linux_api():
-    max_attempts = 100
-    attempt = 0
-    while attempt < max_attempts:
-        api = API.TelegramDesktop.Generate()
-        if 'linux' not in api.device_model.lower():
-            return api
-        attempt += 1
-    api = API.TelegramDesktop.Generate()
-    api.device_model = "Desktop"
-    return api
+    return build_official_api()
 
 def find_tdata_folders(root_dir):
     tdata_dirs = set()

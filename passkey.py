@@ -35,7 +35,7 @@ logger = logging.getLogger(__name__)
 load_dotenv()
 from i18n import tr, lang_from_update, get_env_i18n
 from task_engine import (BatchTask, run_batch, pack_and_send,
-                         classify_rpc_error, place_failed, ERR_UNKNOWN)
+                         classify_rpc_error, place_failed, build_official_api, ERR_UNKNOWN)
 
 PASSKEY_BACK = os.getenv("PASSKEY_BACK", "🔑 <b>Passkey 功能管理</b>\n\n请选择您要执行的操作：").replace('\\n', '\n')
 user_passkey_states = {}
@@ -123,16 +123,7 @@ def B64UrlDecodeToLatin1(Text: str) -> str:
     return base64.urlsafe_b64decode(Text + Pad).decode("latin1")
 
 def generate_non_linux_api():
-    max_attempts = 100
-    attempt = 0
-    while attempt < max_attempts:
-        api = API.TelegramDesktop.Generate()
-        if 'linux' not in api.device_model.lower():
-            return api
-        attempt += 1
-    api = API.TelegramDesktop.Generate()
-    api.device_model = "Desktop"
-    return api
+    return build_official_api()
 
 def find_tdata_folders(root_dir):
     tdata_dirs = set()
@@ -334,11 +325,16 @@ async def create_single_passkey(session_file, json_file, out_dir, api_id, api_ha
                 if val:
                     twofa_pwd = str(val)
                     break
-            official_api = API.TelegramDesktop.Generate()
+            official_api = build_official_api(
+                session_path_str,
+                device_model=json_config.get('device_model'),
+                system_version=json_config.get('system_version') or json_config.get('sdk'),
+                app_version=json_config.get('app_version'),
+                system_lang_code=json_config.get('system_lang_code'),
+                lang_pack=json_config.get('lang_pack'),
+            )
             official_api.api_id = final_api_id
             official_api.api_hash = final_api_hash
-            if json_config.get('device_model'):
-                official_api.device_model = json_config['device_model']
             proxy = get_random_proxy_dict()
             client = TelegramClient(session_path_str, api=official_api, proxy=proxy, receive_updates=False, timeout=10, connection_retries=1)
             break
@@ -449,7 +445,7 @@ async def login_single_passkey(passkey_file, out_dir, api_id, api_hash):
         Flags = bytes.fromhex(str(PasskeyData.get("LoginFlagsHex", "01")))
         RpIdHash = hashlib.sha256(RpId.encode("utf-8")).digest()
         PrivateKey = ec.derive_private_key(int(PrivateKeyHex, 16), ec.SECP256R1())
-        official_api = API.TelegramDesktop.Generate()
+        official_api = build_official_api(SessionPath)
         official_api.api_id = api_id
         official_api.api_hash = api_hash
         proxy = get_random_proxy_dict()

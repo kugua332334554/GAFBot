@@ -21,7 +21,7 @@ logger = logging.getLogger(__name__)
 from i18n import tr, lang_from_update, get_env_i18n
 from dotenv import load_dotenv
 load_dotenv()
-from task_engine import BatchTask, run_batch, arm_timeout, request_stop
+from task_engine import BatchTask, run_batch, arm_timeout, request_stop, build_official_api
 
 CONVERT_API_BACK = os.getenv("CONVERT_API_BACK", "").replace('\\n', '\n')
 SERVER_IP = os.getenv("SERVER_IP")
@@ -110,16 +110,7 @@ def safe_extract(zip_ref, target_dir):
         zip_ref.extract(member, target_dir)
 
 def generate_non_linux_api():
-    max_attempts = 100
-    attempt = 0
-    while attempt < max_attempts:
-        api = API.TelegramDesktop.Generate()
-        if 'linux' not in api.device_model.lower():
-            return api
-        attempt += 1
-    api = API.TelegramDesktop.Generate()
-    api.device_model = "Desktop"
-    return api
+    return build_official_api()
 
 def find_tdata_folders(root_dir):
     tdata_dirs = set()

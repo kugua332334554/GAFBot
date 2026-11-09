@@ -19,7 +19,7 @@ from telegram.constants import ParseMode
 from telegram.ext import ContextTypes
 from i18n import tr, lang_from_update, get_env_i18n
 from task_engine import (BatchTask, run_batch, arm_timeout, pack_and_send,
-                         classify_rpc_error, place_failed, ERR_UNKNOWN)
+                         classify_rpc_error, place_failed, build_official_api, ERR_UNKNOWN)
 
 logger = logging.getLogger(__name__)
 
@@ -189,16 +189,7 @@ def read_2fa_from_folder(folder_path: str) -> Optional[str]:
     return None
 
 def generate_non_linux_api():
-    max_attempts = 100
-    attempt = 0
-    while attempt < max_attempts:
-        api = API.TelegramDesktop.Generate()
-        if 'linux' not in api.device_model.lower():
-            return api
-        attempt += 1
-    api = API.TelegramDesktop.Generate()
-    api.device_model = "Desktop"
-    return api
+    return build_official_api()
 
 async def convert_session_to_tdata(session_path: str, output_dir: str, twofa: Optional[str] = None) -> Tuple[bool, str, Optional[str]]:
     start_time = time.time()
@@ -248,29 +239,17 @@ async def convert_session_to_tdata(session_path: str, output_dir: str, twofa: Op
     retry_count = 0
     while retry_count < 2:
         try:
-            official_api = API.TelegramDesktop.Generate()
-            if device_model is None:
-                max_attempts = 100
-                attempt = 0
-                while 'linux' in official_api.device_model.lower() and attempt < max_attempts:
-                    official_api = API.TelegramDesktop.Generate()
-                    attempt += 1
-                if 'linux' in official_api.device_model.lower():
-                    official_api.device_model = "Desktop"
-            else:
-                official_api.device_model = device_model
-            
+            official_api = build_official_api(
+                session_path,
+                device_model=device_model,
+                system_version=system_vision,
+                app_version=app_version,
+                system_lang_code=system_lang_code,
+                lang_pack=lang_pack,
+            )
+
             official_api.api_id = api_id_val
             official_api.api_hash = api_hash_val
-            if app_version:
-                official_api.app_version = app_version
-            if system_lang_code:
-                official_api.system_lang_code = system_lang_code
-            if system_vision:
-                official_api.system_version = system_vision
-            if lang_pack:
-                official_api.lang_pack = lang_pack
-                official_api.lang_code = lang_pack
 
             client = TelegramClient(
                 use_session,

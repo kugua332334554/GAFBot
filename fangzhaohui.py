@@ -22,7 +22,7 @@ from opentele.api import API
 from opentele.td import TDesktop
 from i18n import tr, lang_from_update, get_env_i18n
 from task_engine import (BatchTask, run_batch, arm_timeout, pack_and_send,
-                         classify_rpc_error, place_failed,
+                         classify_rpc_error, place_failed, build_official_api,
                          ERR_UNKNOWN, ERR_DEAD, ERR_CODE_SEND, ERR_2FA_RESET_FAIL)
 
 load_dotenv()
@@ -173,16 +173,7 @@ def safe_extract(zip_ref, target_dir):
         zip_ref.extract(member, target_dir)
 
 def generate_non_linux_api():
-    max_attempts = 100
-    attempt = 0
-    while attempt < max_attempts:
-        api = API.TelegramDesktop.Generate()
-        if 'linux' not in api.device_model.lower():
-            return api
-        attempt += 1
-    api = API.TelegramDesktop.Generate()
-    api.device_model = "Desktop"
-    return api
+    return build_official_api()
 
 def find_tdata_folders(root_dir):
     tdata_dirs = set()
@@ -785,29 +776,17 @@ async def process_single_account(session_path, json_path, two_fa, user_id, sessi
         retry_count = 0
         while retry_count < 2:
             try:
-                official_api_old = API.TelegramDesktop.Generate()
-                if device_model is None:
-                    max_attempts = 100
-                    attempt = 0
-                    while 'linux' in official_api_old.device_model.lower() and attempt < max_attempts:
-                        official_api_old = API.TelegramDesktop.Generate()
-                        attempt += 1
-                    if 'linux' in official_api_old.device_model.lower():
-                        official_api_old.device_model = "Desktop"
-                else:
-                    official_api_old.device_model = device_model
+                official_api_old = build_official_api(
+                    session_path,
+                    device_model=device_model,
+                    system_version=system_version,
+                    app_version=app_version,
+                    system_lang_code=system_lang_code,
+                    lang_pack=lang_pack,
+                )
 
                 official_api_old.api_id = api_id_val
                 official_api_old.api_hash = api_hash_val
-                if app_version:
-                    official_api_old.app_version = app_version
-                if system_lang_code:
-                    official_api_old.system_lang_code = system_lang_code
-                if system_version:
-                    official_api_old.system_version = system_version
-                if lang_pack:
-                    official_api_old.lang_pack = lang_pack
-                    official_api_old.lang_code = lang_pack
 
                 client_old = OpenteleClient(
                     session=str(session_copy),
@@ -874,7 +853,7 @@ async def process_single_account(session_path, json_path, two_fa, user_id, sessi
         proxy_new = get_random_proxy()
         proxy_dict_new = create_proxy_dict(proxy_new) if proxy_new else None
 
-        official_api_new = API.TelegramDesktop.Generate()
+        official_api_new = build_official_api(new_session_path)
 
         client_new = OpenteleClient(
             session=str(new_session_path),

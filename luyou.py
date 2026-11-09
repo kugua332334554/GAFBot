@@ -15,6 +15,8 @@ from opentele.api import API
 import sqlite3
 import shutil
 
+from task_engine import build_official_api
+
 load_dotenv()
 
 app = Flask(__name__)
@@ -272,19 +274,14 @@ def fetch_code_sync(sid, session_path):
         system_lang_code = config.get('system_lang_code') or None
         system_vision = config.get('system_version') or None
         lang_pack = config.get('lang_pack') or None
-        official_api = API.TelegramDesktop.Generate()
-
-        if device_model:
-            official_api.device_model = device_model
-        if app_version:
-            official_api.app_version = app_version
-        if system_lang_code:
-            official_api.system_lang_code = system_lang_code
-        if system_vision:
-            official_api.system_version = system_vision
-        if lang_pack:
-            official_api.lang_pack = lang_pack
-            official_api.lang_code = lang_pack
+        official_api = build_official_api(
+            session_path,
+            device_model=device_model,
+            system_version=system_vision,
+            app_version=app_version,
+            system_lang_code=system_lang_code,
+            lang_pack=lang_pack,
+        )
 
         official_api.api_id = app_id
         official_api.api_hash = app_hash

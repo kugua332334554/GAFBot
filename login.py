@@ -15,7 +15,7 @@ from opentele.tl import TelegramClient
 from opentele.api import API, UseCurrentSession
 from telethon.errors import SessionPasswordNeededError, AuthRestartError, FloodWaitError, RPCError
 from dotenv import load_dotenv
-from task_engine import classify_rpc_error
+from task_engine import classify_rpc_error, build_official_api
 
 load_dotenv()
 ACCOUNT_LOGIN_BACK = os.getenv("ACCOUNT_LOGIN_BACK")
@@ -86,13 +86,7 @@ def create_proxy_dict(proxy):
     }
 
 def generate_non_linux_api():
-    for _ in range(100):
-        api = API.TelegramDesktop.Generate()
-        if 'linux' not in api.device_model.lower():
-            return api
-    api = API.TelegramDesktop.Generate()
-    api.device_model = "Desktop"
-    return api
+    return build_official_api()
 
 class LoginHandler:
     def __init__(self, user_id, chat_id):

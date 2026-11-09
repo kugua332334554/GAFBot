@@ -21,7 +21,7 @@ from telegram.constants import ParseMode
 from telegram.ext import ContextTypes
 from i18n import tr, lang_from_update, get_env_i18n
 from task_engine import (BatchTask, run_batch, arm_timeout, pack_and_send,
-                         classify_rpc_error, place_failed,
+                         classify_rpc_error, place_failed, build_official_api,
                          ERR_UNKNOWN, ERR_DEAD)
 from dotenv import load_dotenv
 from opentele.tl import TelegramClient
@@ -261,16 +261,7 @@ def safe_extract(zip_ref, target_dir):
         zip_ref.extract(member, target_dir)
 
 def generate_non_linux_api():
-    max_attempts = 100
-    attempt = 0
-    while attempt < max_attempts:
-        api = API.TelegramDesktop.Generate()
-        if 'linux' not in api.device_model.lower():
-            return api
-        attempt += 1
-    api = API.TelegramDesktop.Generate()
-    api.device_model = "Desktop"
-    return api
+    return build_official_api()
 
 def find_tdata_folders(root_dir):
     tdata_dirs = set()
@@ -843,27 +834,16 @@ async def _process_clean_internal(update, context, zip_path, user_id, api_id, ap
                     try:
                         proxy = get_random_proxy()
                         proxy_dict = create_proxy_dict(proxy) if proxy else None
-                        official_api_local = API.TelegramDesktop.Generate()
-                        if device_model is None:
-                            attempt = 0
-                            while 'linux' in official_api_local.device_model.lower() and attempt < 100:
-                                official_api_local = API.TelegramDesktop.Generate()
-                                attempt += 1
-                            if 'linux' in official_api_local.device_model.lower():
-                                official_api_local.device_model = "Desktop"
-                        else:
-                            official_api_local.device_model = device_model
+                        official_api_local = build_official_api(
+                            session_file,
+                            device_model=device_model,
+                            system_version=system_version,
+                            app_version=app_version,
+                            system_lang_code=system_lang_code,
+                            lang_pack=lang_pack,
+                        )
                         official_api_local.api_id = final_api_id
                         official_api_local.api_hash = final_api_hash
-                        if app_version:
-                            official_api_local.app_version = app_version
-                        if system_lang_code:
-                            official_api_local.system_lang_code = system_lang_code
-                        if system_version:
-                            official_api_local.system_version = system_version
-                        if lang_pack:
-                            official_api_local.lang_pack = lang_pack
-                            official_api_local.lang_code = lang_pack
                         client = TelegramClient(use_session, api=official_api_local, proxy=proxy_dict, receive_updates=False, timeout=10, connection_retries=1)
                         break
                     except ValueError as e:
