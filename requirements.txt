@@ -19,7 +19,7 @@ idna
 itsdangerous
 Jinja2
 MarkupSafe
-opentele
+opentele-kugua
 packaging
 priority
 psutil
