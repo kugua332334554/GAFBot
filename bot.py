@@ -44,7 +44,8 @@ from chaibao import show_unpack_menu, handle_unpack_document, handle_unpack_form
 from shaiban import show_check_ban, handle_ban_document, user_ban_states
 from fangzhaohui import (
     show_prevent_recovery, handle_recovery_document, handle_recovery_2fa_input,
-    handle_recovery_skip, user_recovery_states
+    handle_recovery_skip, handle_recovery_mode, handle_recovery_webver,
+    user_recovery_states
 )
 from task_engine import task_stop_callback
 from xiaohui import handle_destroy_document, DESTROY_BACK
@@ -393,6 +394,12 @@ async def process_button_callback(update: Update, context: ContextTypes.DEFAULT_
 
     elif data == "recovery_skip_2fa":
         await handle_recovery_skip(update, context)
+
+    elif data in ["recovery_mode_fast", "recovery_mode_normal"]:
+        await handle_recovery_mode(update, context)
+
+    elif data in ["recovery_ver_k", "recovery_ver_a", "recovery_ver_mix"]:
+        await handle_recovery_webver(update, context)
 
     elif data == "destroy_session":
         lang = lang_from_update(update)

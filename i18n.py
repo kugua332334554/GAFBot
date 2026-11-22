@@ -317,6 +317,15 @@ STRINGS = {
     "recovery.processing": {"zh": "正在处理，请稍候...", "tw": "正在處理，請稍候...", "en": "Processing, please wait..."},
     "recovery.seconds": {"zh": "秒", "tw": "秒", "en": "s"},
     "recovery.secured": {"zh": "已安全加固", "tw": "已安全加固", "en": "Secured"},
+    "recovery.choose_mode": {"zh": "请选择做号方式：", "tw": "請選擇做號方式：", "en": "Choose account method:"},
+    "recovery.mode_fast": {"zh": "快速做号（新版）", "tw": "快速做號（新版）", "en": "Fast Mode (New)"},
+    "recovery.mode_normal": {"zh": "正常做号", "tw": "正常做號", "en": "Normal Mode"},
+    "recovery.choose_ver": {"zh": "请选择新设备版本（仅快速做号）：", "tw": "請選擇新設備版本（僅快速做號）：", "en": "Choose new device version (fast mode only):"},
+    "recovery.ver_k": {"zh": "K版", "tw": "K版", "en": "K Version"},
+    "recovery.ver_a": {"zh": "A版", "tw": "A版", "en": "A Version"},
+    "recovery.ver_mix": {"zh": "混着做", "tw": "混著做", "en": "Mixed"},
+    "recovery.fast_warn": {"zh": "<tg-emoji emoji-id=\"6249123672754234724\">❗️</tg-emoji> 快速做号完成后，新 web 会话无法再次生成授权 token，同一账号不能连续做两次快速做号；如需再次做号请用正常做号。", "tw": "<tg-emoji emoji-id=\"6249123672754234724\">❗️</tg-emoji> 快速做號完成後，新 web 會話無法再次生成授權 token，同一帳號不能連續做兩次快速做號；如需再次做號請用正常做號。", "en": "<tg-emoji emoji-id=\"6249123672754234724\">❗️</tg-emoji> After fast mode, the new web session cannot generate another auth token, so the same account cannot be fast-processed twice. Use normal mode for a second pass."},
+    "recovery.fast_starting": {"zh": "快速做号开始，正在处理...", "tw": "快速做號開始，正在處理...", "en": "Fast mode started, processing..."},
 
     # ---- 拆包工具 ----
     "unpack.processing": {"zh": "正在解压分析...", "tw": "正在解壓分析...", "en": "Analyzing archive..."},

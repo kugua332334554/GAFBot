@@ -103,13 +103,15 @@ async def run_batch(update, context, task, process_one, on_progress=None, progre
             pass
 
     task._progress_msg = None
+    initial_body = f"<tg-emoji emoji-id='5839200986022812209'>🔄</tg-emoji> {tr('task.running', lang)}"
     try:
         task._progress_msg = await context.bot.send_message(
             chat_id=task.chat_id,
-            text=f"<tg-emoji emoji-id='5839200986022812209'>🔄</tg-emoji> {tr('task.running', lang)}",
+            text=initial_body,
             parse_mode='HTML',
             reply_markup=stop_btn
         )
+        task._last_progress_body = initial_body
     except Exception as e:
         logger.error(f"发送进度消息失败: {e}")
 
