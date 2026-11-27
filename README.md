@@ -2,7 +2,7 @@
   <table border="0">
     <tr>
       <td align="center" bgcolor="#1a1a1a" style="border: 2px solid #d4af37; border-radius: 10px; padding: 20px;">
-        <p><b>✨ 米哈亲邻 ✨</b></p>
+        <p><b>✨ 米哈亲临 ✨</b></p>
         <hr />
        <img width="320" height="320" alt="image" src="https://github.com/user-attachments/assets/98d7cf51-1cee-4a53-a86f-d7d140f405d3" />
         <p><font color="#d4af37" size="5"><b>特别牛逼的米哈先生莅临</b></font></p>
