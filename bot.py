@@ -394,12 +394,12 @@ async def process_button_callback(update: Update, context: ContextTypes.DEFAULT_
 
     elif data == "recovery_skip_2fa":
         await handle_recovery_skip(update, context)
+#临时停用 新device可能会在旧device logout后remove
+   # elif data in ["recovery_mode_fast", "recovery_mode_normal"]:
+   #     await handle_recovery_mode(update, context)
 
-    elif data in ["recovery_mode_fast", "recovery_mode_normal"]:
-        await handle_recovery_mode(update, context)
-
-    elif data in ["recovery_ver_k", "recovery_ver_a", "recovery_ver_mix"]:
-        await handle_recovery_webver(update, context)
+#    elif data in ["recovery_ver_k", "recovery_ver_a", "recovery_ver_mix"]:
+ #       await handle_recovery_webver(update, context)
 
     elif data == "destroy_session":
         lang = lang_from_update(update)
