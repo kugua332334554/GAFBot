@@ -1,13 +1,3 @@
-# -*- coding: utf-8 -*-
-"""
-GAFBot 多语言支持模块。
-集中管理所有用户界面文案（简体 zh / 繁体 tw / 英文 en），并提供语言判定函数。
-
-语言判定规则：
-- stored（用户手动选择）优先；
-- 否则按 Telegram 用户的 language_code 判断：含 tw/hk/hant -> tw，含 zh -> zh，其余 -> en；
-- 空值兜底 zh。
-"""
 import os
 
 # ============ 三语文案字典 ============
@@ -37,6 +27,8 @@ STRINGS = {
     "menu.format_convert": {"zh": "格式互转", "tw": "格式互轉", "en": "Format Convert"},
     "menu.convert_api": {"zh": "转API", "tw": "轉API", "en": "Convert to API"},
     "menu.prevent_recovery": {"zh": "防止找回", "tw": "防止找回", "en": "Prevent Recovery"},
+    "menu.sync_login": {"zh": "同步登录", "tw": "同步登入", "en": "Sync Login"},
+    "menu.fast_auth": {"zh": "快速新授权", "tw": "快速新授權", "en": "Fast Auth"},
     "menu.check_ban": {"zh": "号码筛BAN", "tw": "號碼篩BAN", "en": "Check Ban"},
     "menu.check_material": {"zh": "筛料能力", "tw": "篩料能力", "en": "Check Material"},
     "menu.clean_account": {"zh": "清理账号", "tw": "清理帳號", "en": "Clean Account"},
@@ -326,6 +318,25 @@ STRINGS = {
     "recovery.ver_mix": {"zh": "混着做", "tw": "混著做", "en": "Mixed"},
     "recovery.fast_warn": {"zh": "<tg-emoji emoji-id=\"6249123672754234724\">❗️</tg-emoji> 快速做号完成后，新 web 会话无法再次生成授权 token，同一账号不能连续做两次快速做号；如需再次做号请用正常做号。", "tw": "<tg-emoji emoji-id=\"6249123672754234724\">❗️</tg-emoji> 快速做號完成後，新 web 會話無法再次生成授權 token，同一帳號不能連續做兩次快速做號；如需再次做號請用正常做號。", "en": "<tg-emoji emoji-id=\"6249123672754234724\">❗️</tg-emoji> After fast mode, the new web session cannot generate another auth token, so the same account cannot be fast-processed twice. Use normal mode for a second pass."},
     "recovery.fast_starting": {"zh": "快速做号开始，正在处理...", "tw": "快速做號開始，正在處理...", "en": "Fast mode started, processing..."},
+
+    "sync.title": {"zh": "同步登录", "tw": "同步登入", "en": "Sync Login"},
+    "sync.instruction": {"zh": "请上传完成号包（ZIP，内含 session/json）。系统会使用 2040 Desktop 设备自动接码登录，不会退出其他设备，也不会退出原设备。", "tw": "請上傳完成號包（ZIP，內含 session/json）。系統會使用 2040 Desktop 設備自動接碼登入，不會退出其他設備，也不會退出原設備。", "en": "Upload the finished pack (ZIP with session/json). Accounts are signed in with a 2040 Desktop device; other sessions and the original session stay active."},
+    "sync.start": {"zh": "同步登录任务开始", "tw": "同步登入任務開始", "en": "Sync login started"},
+    "sync.in_progress": {"zh": "同步登录任务进行中", "tw": "同步登入任務進行中", "en": "Sync login in progress"},
+    "sync.done": {"zh": "同步登录任务完成", "tw": "同步登入任務完成", "en": "Sync login complete"},
+    "sync.failed": {"zh": "同步登录任务失败", "tw": "同步登入任務失敗", "en": "Sync login failed"},
+    "sync.success_caption": {"zh": "同步登录成功的账号", "tw": "同步登入成功的帳號", "en": "Accounts synced"},
+    "sync.failed_caption": {"zh": "同步登录失败的账号", "tw": "同步登入失敗的帳號", "en": "Failed accounts"},
+    "fast_auth.title": {"zh": "快速新授权生成", "tw": "快速新授權生成", "en": "Fast Authorization"},
+    "fast_auth.instruction": {"zh": "上传父会话包，生成 Web 子授权。父会话保持在线，不会退出旧设备、不会踢其他设备。", "tw": "上傳父會話包，生成 Web 子授權。父會話保持線上，不會退出舊設備、不會踢其他設備。", "en": "Upload parent sessions to create a Web child authorization. The parent session stays online; no logout and no device reset."},
+    "fast_auth.parent_child_risk": {"zh": "父子风险：父会话一旦退出或被踢，子 Web 授权一定会被 Telegram 一起移除。", "tw": "父子風險：父會話一旦退出或被踢，子 Web 授權一定會被 Telegram 一起移除。", "en": "Parent-child risk: if the parent session logs out or is reset, Telegram will remove the child Web authorization too."},
+    "fast_auth.choose_ver": {"zh": "请选择新授权版本：", "tw": "請選擇新授權版本：", "en": "Choose the new authorization version:"},
+    "fast_auth.start": {"zh": "快速新授权生成开始", "tw": "快速新授權生成開始", "en": "Fast authorization started"},
+    "fast_auth.in_progress": {"zh": "快速新授权生成中", "tw": "快速新授權生成中", "en": "Fast authorization in progress"},
+    "fast_auth.done": {"zh": "快速新授权生成完成", "tw": "快速新授權生成完成", "en": "Fast authorization complete"},
+    "fast_auth.failed": {"zh": "快速新授权生成失败", "tw": "快速新授權生成失敗", "en": "Fast authorization failed"},
+    "fast_auth.success_caption": {"zh": "新授权生成成功的账号", "tw": "新授權生成成功的帳號", "en": "Authorizations created"},
+    "fast_auth.failed_caption": {"zh": "新授权生成失败的账号", "tw": "新授權生成失敗的帳號", "en": "Failed accounts"},
 
     # ---- 拆包工具 ----
     "unpack.processing": {"zh": "正在解压分析...", "tw": "正在解壓分析...", "en": "Analyzing archive..."},

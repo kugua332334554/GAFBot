@@ -28,6 +28,7 @@ from task_engine import (BatchTask, run_batch, arm_timeout, pack_and_send,
                          classify_rpc_error, place_failed, build_official_api,
                          ERR_UNKNOWN, ERR_DEAD, ERR_CODE_SEND, ERR_2FA_RESET_FAIL)
 
+#移除web找回
 load_dotenv()
 logger = logging.getLogger(__name__)
 
@@ -35,18 +36,6 @@ PREVENT_RECOVERY_BACK = os.getenv("PREVENT_RECOVERY_BACK", "").replace('\\n', '\
 
 FANGZHAOHUI_API_ID = 2040
 FANGZHAOHUI_API_HASH = "b18441a1ff607e10a989891a5462e627"
-
-WEB_AUTH_URLS = {
-    "k": "https://web.telegram.org/k/",
-    "a": "https://web.telegram.org/a/",
-}
-WEB_DC_IPS = {
-    1: "149.154.175.53",
-    2: "149.154.167.51",
-    3: "149.154.175.100",
-    4: "149.154.167.91",
-    5: "91.108.56.130",
-}
 
 ADMIN_ID = os.getenv("ADMIN_ID", "")
 MAX_EXTRACT_SIZE = int(os.getenv("MK_TIME", 4)) * 1024 * 1024
@@ -192,20 +181,6 @@ def safe_extract(zip_ref, target_dir):
 
 def generate_non_linux_api():
     return build_official_api()
-
-def resolve_web_ver(web_ver):
-    if web_ver == "mix":
-        return random.choice(("k", "a"))
-    return web_ver
-
-def web_auth_url(web_ver):
-    return WEB_AUTH_URLS.get(web_ver, WEB_AUTH_URLS["k"])
-
-def generate_web_api(web_ver, unique_id=None):
-    ver = resolve_web_ver(web_ver)
-    if ver == "a":
-        return API.TelegramWeb_Z.Generate(unique_id=unique_id)
-    return API.TelegramWeb_K.Generate(unique_id=unique_id)
 
 def find_tdata_folders(root_dir):
     tdata_dirs = set()
@@ -450,7 +425,7 @@ async def handle_recovery_document(update: Update, context: ContextTypes.DEFAULT
                 return
 
         user_recovery_states[user_id] = {
-            "state": "waiting_mode",
+            "state": "waiting_2fa",
             "session_files": session_files,
             "extract_dir": extract_dir,
             "zip_path": zip_path,
@@ -458,8 +433,7 @@ async def handle_recovery_document(update: Update, context: ContextTypes.DEFAULT
         }
 
         keyboard = [
-            [create_icon_button(tr("recovery.mode_fast", lang), "recovery_mode_fast", "6174727670887096295")],
-            [create_icon_button(tr("recovery.mode_normal", lang), "recovery_mode_normal", "5850531311613123338")],
+            [create_icon_button(tr("recovery.skip_2fa", lang), "recovery_skip_2fa", "5870630779305860331")],
             [create_back_button(lang=lang)]
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
@@ -467,7 +441,7 @@ async def handle_recovery_document(update: Update, context: ContextTypes.DEFAULT
         await update.message.reply_text(
             f"""<tg-emoji emoji-id="5920052658743283381">✅</tg-emoji> {tr('recovery.extracted', lang)} {len(session_files)} {tr('recovery.accounts_unit', lang)}
 
-<tg-emoji emoji-id="6005570495603282482">🔐</tg-emoji> {tr('recovery.choose_mode', lang)}""",
+<tg-emoji emoji-id="6005570495603282482">🔐</tg-emoji> {tr('recovery.ask_2fa', lang)}""",
             parse_mode='HTML',
             reply_markup=reply_markup
         )
@@ -488,77 +462,6 @@ async def handle_recovery_document(update: Update, context: ContextTypes.DEFAULT
                 shutil.rmtree(extract_dir, ignore_errors=True)
         except:
             pass
-
-async def handle_recovery_mode(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    user_id = str(query.from_user.id)
-    await query.answer()
-    lang = lang_from_update(update)
-
-    state_info = user_recovery_states.get(user_id)
-    if not state_info or state_info.get("state") != "waiting_mode":
-        await query.edit_message_text(
-            "<tg-emoji emoji-id='5778527486270770928'>❌</tg-emoji> " + tr("recovery.expired", lang),
-            parse_mode='HTML',
-            reply_markup=InlineKeyboardMarkup([[create_back_button(lang=lang)]])
-        )
-        return
-
-    mode = query.data.replace("recovery_mode_", "", 1)
-    if mode == "normal":
-        state_info["state"] = "waiting_2fa"
-        state_info["mode"] = "normal"
-        keyboard = [
-            [create_icon_button(tr("recovery.skip_2fa", lang), "recovery_skip_2fa", "5870630779305860331")],
-            [create_back_button(lang=lang)]
-        ]
-        await query.edit_message_text(
-            f"""<tg-emoji emoji-id="6005570495603282482">🔐</tg-emoji> {tr('recovery.ask_2fa', lang)}""",
-            parse_mode='HTML',
-            reply_markup=InlineKeyboardMarkup(keyboard)
-        )
-        return
-
-    state_info["state"] = "waiting_webver"
-    state_info["mode"] = "fast"
-    keyboard = [
-        [create_icon_button(tr("recovery.ver_k", lang), "recovery_ver_k", "5899786735298025113")],
-        [create_icon_button(tr("recovery.ver_a", lang), "recovery_ver_a", "5900107595124839344")],
-        [create_icon_button(tr("recovery.ver_mix", lang), "recovery_ver_mix", "5960608239623082921")],
-        [create_back_button(lang=lang)]
-    ]
-    await query.edit_message_text(
-        f"""<tg-emoji emoji-id="6005570495603282482">🔐</tg-emoji> {tr('recovery.choose_ver', lang)}
-
-{tr('recovery.fast_warn', lang)}""",
-        parse_mode='HTML',
-        reply_markup=InlineKeyboardMarkup(keyboard)
-    )
-
-async def handle_recovery_webver(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    user_id = str(query.from_user.id)
-    await query.answer()
-    lang = lang_from_update(update)
-
-    state_info = user_recovery_states.get(user_id)
-    if not state_info or state_info.get("state") != "waiting_webver":
-        await query.edit_message_text(
-            "<tg-emoji emoji-id='5778527486270770928'>❌</tg-emoji> " + tr("recovery.expired", lang),
-            parse_mode='HTML',
-            reply_markup=InlineKeyboardMarkup([[create_back_button(lang=lang)]])
-        )
-        return
-
-    state_info["web_ver"] = query.data.replace("recovery_ver_", "", 1)
-    state_info["state"] = "processing"
-
-    await query.edit_message_text(
-        f"<tg-emoji emoji-id='5839200986022812209'>🔄</tg-emoji> {tr('recovery.fast_starting', lang)}",
-        parse_mode='HTML'
-    )
-
-    await process_recovery_task(update, context, user_id, two_fa=None)
 
 async def handle_recovery_skip(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -599,8 +502,6 @@ async def process_recovery_task(update: Update, context: ContextTypes.DEFAULT_TY
     zip_path = state_info["zip_path"]
     zip_base = state_info.get("zip_base")
     zip_base = state_info.get("zip_base") or f"recovery_{user_id}"
-    mode = state_info.get("mode", "normal")
-    web_ver = state_info.get("web_ver", "k")
 
     status_msg = await context.bot.send_message(
         chat_id=update.effective_chat.id,
@@ -616,7 +517,7 @@ async def process_recovery_task(update: Update, context: ContextTypes.DEFAULT_TY
 
     try:
         result_temp = tempfile.mkdtemp()
-        await _process_recovery_internal(update, context, user_id, session_files, extract_dir, two_fa, status_msg, result_temp, zip_base, mode=mode, web_ver=web_ver)
+        await _process_recovery_internal(update, context, user_id, session_files, extract_dir, two_fa, status_msg, result_temp, zip_base)
     except Exception as e:
         await context.bot.send_message(
             chat_id=update.effective_chat.id,
@@ -637,7 +538,7 @@ async def process_recovery_task(update: Update, context: ContextTypes.DEFAULT_TY
 
         user_recovery_states.pop(user_id, None)
 
-async def _process_recovery_internal(update, context, user_id, session_files, extract_dir, two_fa, status_msg, result_temp, zip_base=None, mode="normal", web_ver="k"):
+async def _process_recovery_internal(update, context, user_id, session_files, extract_dir, two_fa, status_msg, result_temp, zip_base=None):
     lang = lang_from_update(update)
     success_dir = os.path.join(result_temp, "success")
     failed_dir = os.path.join(result_temp, "failed")
@@ -667,10 +568,7 @@ async def _process_recovery_internal(update, context, user_id, session_files, ex
                     json_path = os.path.join(root, f"{session_name}.json")
                     break
         try:
-            if mode == "fast":
-                coro = process_single_account_web_fast(session_path, json_path, user_id, session_name, web_ver)
-            else:
-                coro = process_single_account(session_path, json_path, two_fa, user_id, session_name)
+            coro = process_single_account(session_path, json_path, two_fa, user_id, session_name)
             result = await asyncio.wait_for(coro, timeout=120)
         except asyncio.TimeoutError:
             result = {"session_name": session_name, "status": "failed", "message": "处理超时（超过120秒）", "error_label": ERR_UNKNOWN, "new_session_path": None, "new_json_path": None}
@@ -827,212 +725,6 @@ async def secure_before_login(client):
     except Exception as e:
         res["errs"].append(f"get_pks:{e}")
     return res
-
-async def process_single_account_web_fast(session_path, json_path, user_id, session_name, web_ver):
-    result = {
-        "session_name": session_name,
-        "status": "failed",
-        "message": "",
-        "error_label": ERR_UNKNOWN,
-        "new_session_path": None,
-        "new_json_path": None
-    }
-
-    temp_dir = tempfile.mkdtemp()
-    new_session_path = os.path.join(temp_dir, f"{session_name}_new.session")
-
-    client_old = None
-    client_new = None
-
-    try:
-        orig_json_data = {}
-        if json_path and os.path.exists(json_path):
-            try:
-                with open(json_path, 'r', encoding='utf-8') as f:
-                    orig_json_data = json.load(f)
-            except Exception:
-                pass
-
-        api_id_val = FANGZHAOHUI_API_ID
-        api_hash_val = FANGZHAOHUI_API_HASH
-        if orig_json_data:
-            if 'app_id' in orig_json_data and orig_json_data['app_id']:
-                try:
-                    api_id_val = int(orig_json_data['app_id'])
-                except (ValueError, TypeError):
-                    pass
-            if 'app_hash' in orig_json_data and orig_json_data['app_hash']:
-                api_hash_val = str(orig_json_data['app_hash'])
-
-        device_model = orig_json_data.get('device_model') or None
-        app_version = orig_json_data.get('app_version') or None
-        system_lang_code = orig_json_data.get('system_lang_code') or None
-        system_version = orig_json_data.get('system_version') or orig_json_data.get('sdk') or None
-        lang_pack = orig_json_data.get('lang_pack') or None
-
-        session_copy = os.path.join(temp_dir, f"{session_name}_copy.session")
-        shutil.copy2(session_path, session_copy)
-
-        proxy = get_random_proxy()
-        proxy_dict = create_proxy_dict(proxy) if proxy else None
-
-        official_api_old = build_official_api(
-            session_path,
-            device_model=device_model,
-            system_version=system_version,
-            app_version=app_version,
-            system_lang_code=system_lang_code,
-            lang_pack=lang_pack,
-        )
-        official_api_old.api_id = api_id_val
-        official_api_old.api_hash = api_hash_val
-
-        client_old = OpenteleClient(
-            session=str(session_copy),
-            api=official_api_old,
-            proxy=proxy_dict,
-            receive_updates=False,
-            timeout=10,
-            connection_retries=1
-        )
-
-        await asyncio.wait_for(client_old.connect(), timeout=15)
-        if not await asyncio.wait_for(client_old.is_user_authorized(), timeout=10):
-            result["message"] = "原session无效"
-            result["error_label"] = ERR_DEAD
-            return result
-
-        me = await asyncio.wait_for(client_old.get_me(), timeout=10)
-        if not me:
-            result["message"] = "无法获取用户信息"
-            result["error_label"] = ERR_DEAD
-            return result
-        phone = me.phone
-
-        if not json_path or not os.path.exists(json_path):
-            generated_json = await generate_json_for_session(
-                session_path, client_old, me, api_id_val, api_hash_val, official_api_old
-            )
-            if generated_json:
-                json_path = generated_json
-
-        try:
-            secure_pre = await secure_before_login(client_old)
-            log_time(f"登录前安全清理: 踢出其他设备 {secure_pre['kicked']} 个, 销毁 Passkey {secure_pre['del_pk']} 个, 错误 {secure_pre['errs']}")
-        except Exception as e:
-            logger.warning(f"登录前安全清理异常: {e}")
-
-        ver = resolve_web_ver(web_ver)
-        source_url = web_auth_url(ver)
-
-        res = await asyncio.wait_for(
-            client_old(RequestUrlAuthRequest(url=source_url)),
-            timeout=20
-        )
-        auth_url = getattr(res, "url", None)
-        if not auth_url or "#" not in auth_url:
-            result["message"] = "获取网页授权链接失败"
-            return result
-
-        params = dict(item.split("=", 1) for item in auth_url.split("#", 1)[1].split("&"))
-        token = params.get("tgWebAuthToken")
-        try:
-            dc = int(params.get("tgWebAuthDcId") or 0)
-        except (ValueError, TypeError):
-            dc = 0
-        if not token or dc not in WEB_DC_IPS:
-            result["message"] = "网页授权参数无效"
-            return result
-
-        new_api = generate_web_api(ver, unique_id=os.path.basename(new_session_path))
-        web_api_id = int(new_api.api_id)
-        web_api_hash = str(new_api.api_hash)
-
-        proxy_new = get_random_proxy()
-        proxy_dict_new = create_proxy_dict(proxy_new) if proxy_new else None
-
-        client_new = OpenteleClient(
-            session=str(new_session_path),
-            api=new_api,
-            proxy=proxy_dict_new,
-            receive_updates=False,
-            timeout=10,
-            connection_retries=1
-        )
-        client_new.session.set_dc(dc, WEB_DC_IPS[dc], 443)
-        await asyncio.wait_for(client_new.connect(), timeout=15)
-        await asyncio.wait_for(
-            client_new(ImportWebTokenAuthorizationRequest(
-                api_id=web_api_id,
-                api_hash=web_api_hash,
-                web_auth_token=token
-            )),
-            timeout=20
-        )
-        await asyncio.wait_for(client_new.get_me(), timeout=10)
-        session_string = StringSession.save(client_new.session)
-
-        try:
-            await client_old.log_out()
-        except Exception as e:
-            logger.warning(f"注销旧会话失败: {e}")
-
-        new_json_data = dict(orig_json_data) if orig_json_data else {}
-        new_json_data.update({
-            "api_id": web_api_id,
-            "api_hash": web_api_hash,
-            "app_id": web_api_id,
-            "app_hash": web_api_hash,
-            "device_model": new_api.device_model,
-            "system_version": new_api.system_version,
-            "app_version": new_api.app_version,
-            "system_lang_code": new_api.system_lang_code,
-            "lang_pack": new_api.lang_pack,
-            "lang_code": new_api.lang_code,
-            "pid": getattr(new_api, 'pid', random.randint(100000, 999999)),
-            "user_id": me.id,
-            "phone": phone or orig_json_data.get("phone", ""),
-            "session_file": f"{session_name}_new",
-            "device": new_api.device_model,
-            "username": me.username or "",
-            "premium": bool(getattr(me, "premium", False)),
-            "SDK": new_api.system_version,
-            "sdk": new_api.system_version,
-            "system_lang_pack": new_api.system_lang_code,
-            "session_string": session_string,
-            "dc_id": dc,
-            "web_auth": {"source": source_url, "api_id": web_api_id, "dc_id": dc},
-        })
-        new_json_data.setdefault("twofa", "")
-        new_json_data.setdefault("password", "")
-        new_json_data.setdefault("reg_time", datetime.now().strftime("%Y-%m-%d"))
-        new_json_data.setdefault("sex", None)
-        new_json_data.setdefault("avatar", "img/default.png")
-        new_json_data.setdefault("package_id", "")
-        new_json_data.setdefault("installer", "")
-        new_json_data.setdefault("ipv6", False)
-
-        new_json_path = os.path.join(temp_dir, f"{session_name}_new.json")
-        with open(new_json_path, 'w', encoding='utf-8') as f:
-            json.dump(new_json_data, f, indent=2, ensure_ascii=False)
-
-        result["status"] = "success"
-        result["message"] = "快速做号成功"
-        result["new_session_path"] = new_session_path
-        result["new_json_path"] = new_json_path
-
-    except asyncio.TimeoutError:
-        result["message"] = "网络操作超时"
-    except Exception as e:
-        result["message"] = f"错误: {str(e)[:50]}"
-        result["error_label"] = classify_rpc_error(e)
-    finally:
-        if client_old:
-            await client_old.disconnect()
-        if client_new:
-            await client_new.disconnect()
-
-    return result
 
 async def process_single_account(session_path, json_path, two_fa, user_id, session_name):
     result = {

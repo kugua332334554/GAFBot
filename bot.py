@@ -44,8 +44,13 @@ from chaibao import show_unpack_menu, handle_unpack_document, handle_unpack_form
 from shaiban import show_check_ban, handle_ban_document, user_ban_states
 from fangzhaohui import (
     show_prevent_recovery, handle_recovery_document, handle_recovery_2fa_input,
-    handle_recovery_skip, handle_recovery_mode, handle_recovery_webver,
+    handle_recovery_skip,
     user_recovery_states
+)
+from tongbu import (
+    show_sync_login, handle_sync_document, SYNC_LOGIN_EMOJI_ID,
+    show_fast_auth_menu, handle_fast_auth_document, handle_fast_auth_version,
+    FAST_AUTH_EMOJI_ID, user_sync_states, user_fast_auth_states
 )
 from task_engine import task_stop_callback
 from xiaohui import handle_destroy_document, DESTROY_BACK
@@ -388,18 +393,21 @@ async def process_button_callback(update: Update, context: ContextTypes.DEFAULT_
 
     elif data == "prevent_recovery":
         await show_prevent_recovery(update, context)
+    #登录
+    elif data == "sync_login":
+        await show_sync_login(update, context)
 
     elif data == "unpack_tool":
         await show_unpack_menu(update, context)
 
     elif data == "recovery_skip_2fa":
         await handle_recovery_skip(update, context)
-#临时停用 新device可能会在旧device logout后remove
-   # elif data in ["recovery_mode_fast", "recovery_mode_normal"]:
-   #     await handle_recovery_mode(update, context)
+    #去logout的新版处理器
+    elif data == "fast_auth":
+        await show_fast_auth_menu(update, context)
 
-#    elif data in ["recovery_ver_k", "recovery_ver_a", "recovery_ver_mix"]:
- #       await handle_recovery_webver(update, context)
+    elif data in ["fast_auth_k", "fast_auth_a", "fast_auth_mix"]:
+        await handle_fast_auth_version(update, context)
 
     elif data == "destroy_session":
         lang = lang_from_update(update)
@@ -513,6 +521,14 @@ async def process_handle_document(update: Update, context: ContextTypes.DEFAULT_
 
     if user_id in user_recovery_states and user_recovery_states[user_id].get("state") == "waiting_zip":
         await handle_recovery_document(update, context, user_id)
+        return
+    #判等待
+    if user_id in user_sync_states and user_sync_states[user_id].get("state") == "waiting_zip":
+        await handle_sync_document(update, context, user_id)
+        return
+
+    if user_id in user_fast_auth_states and user_fast_auth_states[user_id].get("state") == "waiting_zip":
+        await handle_fast_auth_document(update, context, user_id)
         return
 
     if user_id in user_ban_states:
@@ -807,6 +823,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_material_states.pop(user_id, None)
     user_ban_states.pop(user_id, None)
     user_recovery_states.pop(user_id, None)
+    user_sync_states.pop(user_id, None)
+    user_fast_auth_states.pop(user_id, None)
     user_unpack_states.pop(user_id, None)
     context.user_data.clear()
     
@@ -841,7 +859,14 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         text = text.replace("{USER}", user.full_name)
         text = re.sub(r'\* (.*)', r'* <code>\1</code>', text)
 
-        def btn(text, data, emoji_id):
+        def btn(text, data, emoji_id, style=None):
+            if style:
+                return InlineKeyboardButton(
+                    text=text,
+                    callback_data=data,
+                    icon_custom_emoji_id=emoji_id,
+                    style=style,
+                )
             return InlineKeyboardButton(text, callback_data=data).to_dict() | {"icon_custom_emoji_id": emoji_id}
 
         keyboard = [
@@ -855,6 +880,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
              btn(tr("menu.format_convert", lang), "format_convert", "6005843436479975944")],
             [btn(tr("menu.convert_api", lang), "convert_api", "5877597667231534929"),
              btn(tr("menu.prevent_recovery", lang), "prevent_recovery", "5870734657384877785")],
+            [btn(tr("menu.sync_login", lang), "sync_login", SYNC_LOGIN_EMOJI_ID),
+             btn(tr("menu.fast_auth", lang), "fast_auth", FAST_AUTH_EMOJI_ID)],
             [btn(tr("menu.check_ban", lang), "check_ban", "5922712343011135025"),
              btn(tr("menu.check_material", lang), "check_material", "5944940516754853337")],
             [btn(tr("menu.clean_account", lang), "clean_account", "6007942490076745785"),
