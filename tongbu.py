@@ -8,6 +8,7 @@ import random
 import tempfile
 import logging
 import zipfile
+from datetime import datetime
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.constants import ParseMode
 from telegram.ext import ContextTypes
@@ -1112,6 +1113,16 @@ async def process_single_fast_auth(session_path, json_path, user_id, session_nam
             "parent_child_risk": "父会话退出或被踢时，子 Web 授权一定会被 Telegram 一起移除",
             "web_auth": {"source": source_url, "api_id": int(web_api.api_id), "dc_id": dc},
         })
+
+        two_fa = orig_json_data.get("twofa") or orig_json_data.get("password") or ""
+        new_json_data.setdefault("twofa", two_fa)
+        new_json_data.setdefault("password", two_fa)
+        new_json_data.setdefault("sex", None)
+        new_json_data.setdefault("avatar", "img/default.png")
+        new_json_data.setdefault("package_id", "")
+        new_json_data.setdefault("installer", "")
+        new_json_data.setdefault("ipv6", False)
+        new_json_data.setdefault("reg_time", datetime.now().strftime("%Y-%m-%d"))
 
         new_json_path = os.path.join(temp_dir, f"{session_name}_web.json")
         with open(new_json_path, 'w', encoding='utf-8') as f:
